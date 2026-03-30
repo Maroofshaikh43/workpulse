@@ -1,0 +1,17 @@
+{
+  "name": "WorkPulse",
+  "short_name": "WorkPulse",
+  "description": "Office HR, attendance, operations, and platform management.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1120",
+  "theme_color": "#0b1120",
+  "icons": [
+    {
+      "src": "/pwa-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
