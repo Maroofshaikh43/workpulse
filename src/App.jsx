@@ -70,9 +70,9 @@ function ProtectedRoute({ session, profile, company, loading, onLogout, children
       <CompanyAccessScreen
         title="Account Suspended"
         lines={[
-          "Your company account has been suspended due to a payment issue.",
+          "Your account has been suspended due to a payment issue.",
           "Please contact support@workpulse.com",
-          "Your data is safe and will be restored immediately upon payment.",
+          "Your data is safe.",
         ]}
         onLogout={onLogout}
       />
@@ -83,8 +83,9 @@ function ProtectedRoute({ session, profile, company, loading, onLogout, children
       <CompanyAccessScreen
         title="Account Pending Verification"
         lines={[
-          "Your company is under review.",
-          "We will notify you once approved.",
+          "Your company is pending approval.",
+          "We will notify you once verified.",
+          "This usually takes 24 hours.",
         ]}
         onLogout={onLogout}
       />
@@ -93,10 +94,11 @@ function ProtectedRoute({ session, profile, company, loading, onLogout, children
   if (profile.role !== "super_admin" && company?.status === "rejected") {
     return (
       <CompanyAccessScreen
-        title="Account Not Approved"
+        title="Company Registration Rejected"
         lines={[
-          "Your company registration was not approved.",
-          "Please contact support@workpulse.com for help.",
+          "Your company registration was rejected.",
+          "Please contact support@workpulse.com",
+          "for more information.",
         ]}
         onLogout={onLogout}
       />
@@ -130,11 +132,13 @@ export default function App() {
     if (!currentSession?.user) {
       setProfile(null);
       setCompany(null);
+      setAuthError("");
       setLoading(false);
       return;
     }
 
     setLoading(true);
+    setAuthError("");
     const { data: superAdminData } = await supabase
       .from("platform_super_admins")
       .select("*")
@@ -154,18 +158,23 @@ export default function App() {
       return;
     }
 
-    const { data, error } = await supabase.from("users").select("*").eq("id", currentSession.user.id).single();
-    if (error) {
-      setAuthError(error.message);
+    const { data: userProfile, error: profileError } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", currentSession.user.id)
+      .single();
+
+    if (profileError) {
+      setAuthError(profileError.message);
       setProfile(null);
       setCompany(null);
       setLoading(false);
       return;
     }
 
-    setProfile(data);
+    setProfile(userProfile);
 
-    if (data.role !== "admin" && !currentSession.user.email_confirmed_at) {
+    if (userProfile.role !== "admin" && !currentSession.user.email_confirmed_at) {
       await supabase.auth.signOut();
       setAuthError("Verify your email before accessing the dashboard.");
       setProfile(null);
@@ -174,11 +183,11 @@ export default function App() {
       return;
     }
 
-    if (data?.company_id) {
+    if (userProfile.company_id) {
       const { data: companyData, error: companyError } = await supabase
         .from("companies")
-        .select("*")
-        .eq("id", data.company_id)
+        .select("status, id, name, gst_number, phone, company_code, office_lat, office_lng, attendance_radius_meters, google_drive_folder_url, verification_status, verification_notes, verified_at, verified_by, created_at")
+        .eq("id", userProfile.company_id)
         .single();
 
       if (companyError) {
