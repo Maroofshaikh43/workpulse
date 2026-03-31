@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 
-export default function CompanySettings() {
-  const { supabase, company, profile, refreshProfile } = useOutletContext();
-  const [form, setForm] = useState({
+function createFormState(company) {
+  return {
     name: company?.name ?? "",
     gst_number: company?.gst_number ?? "",
     phone: company?.phone ?? "",
@@ -11,7 +10,13 @@ export default function CompanySettings() {
     office_lng: company?.office_lng ?? "",
     attendance_radius_meters: company?.attendance_radius_meters ?? 200,
     google_drive_folder_url: company?.google_drive_folder_url ?? "",
-  });
+  };
+}
+
+export default function CompanySettings() {
+  const { supabase, company, profile, refreshProfile } = useOutletContext();
+  const [companyRecord, setCompanyRecord] = useState(company ?? null);
+  const [form, setForm] = useState(createFormState(company));
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [verificationFile, setVerificationFile] = useState(null);
@@ -19,6 +24,7 @@ export default function CompanySettings() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [uploadingVerification, setUploadingVerification] = useState(false);
   const [savingSync, setSavingSync] = useState(false);
+  const [loadingCompany, setLoadingCompany] = useState(true);
   const [googleIntegration, setGoogleIntegration] = useState({
     workspace_domain: "",
     drive_sync_enabled: false,
@@ -28,43 +34,84 @@ export default function CompanySettings() {
     sync_status: "not_connected",
   });
 
-  useEffect(() => {
-    if (!company?.id) return null;
-    supabase
+  const applyCompanyRecord = (nextCompany) => {
+    setCompanyRecord(nextCompany);
+    setForm(createFormState(nextCompany));
+  };
+
+  const fetchCompanyData = async () => {
+    if (!profile?.company_id) return;
+
+    setLoadingCompany(true);
+    const { data, error: fetchError } = await supabase
+      .from("companies")
+      .select("*")
+      .eq("id", profile.company_id)
+      .single();
+
+    if (fetchError) {
+      setError(fetchError.message);
+      setLoadingCompany(false);
+      return;
+    }
+
+    applyCompanyRecord(data);
+    setLoadingCompany(false);
+  };
+
+  const fetchGoogleIntegration = async () => {
+    if (!profile?.company_id) return;
+
+    const { data, error: fetchError } = await supabase
       .from("google_workspace_integrations")
       .select("*")
-      .eq("company_id", company.id)
-      .maybeSingle()
-      .then(({ data }) => {
-        if (data) setGoogleIntegration(data);
-      });
-    return undefined;
-  }, [company?.id, supabase]);
+      .eq("company_id", profile.company_id)
+      .maybeSingle();
+
+    if (fetchError) {
+      setError(fetchError.message);
+      return;
+    }
+
+    if (data) {
+      setGoogleIntegration(data);
+    }
+  };
+
+  useEffect(() => {
+    fetchCompanyData();
+    fetchGoogleIntegration();
+  }, [profile?.company_id, supabase]);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
     setMessage("");
     setError("");
     setSavingSettings(true);
+
     const { error: updateError } = await supabase
       .from("companies")
       .update({
         name: form.name,
         gst_number: form.gst_number,
         phone: form.phone,
-        office_lat: form.office_lat === "" ? null : Number(form.office_lat),
-        office_lng: form.office_lng === "" ? null : Number(form.office_lng),
-        attendance_radius_meters: Number(form.attendance_radius_meters || 200),
+        office_lat: form.office_lat === "" ? null : Number.parseFloat(form.office_lat),
+        office_lng: form.office_lng === "" ? null : Number.parseFloat(form.office_lng),
+        attendance_radius_meters: Number.parseFloat(form.attendance_radius_meters || 200),
         google_drive_folder_url: form.google_drive_folder_url || null,
       })
-      .eq("id", company.id);
+      .eq("id", profile.company_id);
+
     setSavingSettings(false);
+
     if (updateError) {
       setError(updateError.message);
       return;
     }
-    setMessage("Company settings updated.");
-    refreshProfile();
+
+    await fetchCompanyData();
+    await refreshProfile();
+    setMessage("Saved successfully");
   };
 
   const handleVerificationUpload = async (event) => {
@@ -80,10 +127,11 @@ export default function CompanySettings() {
     }
 
     const ext = verificationFile.name.split(".").pop();
-    const path = `${company.id}/${verificationType}-${Date.now()}.${ext}`;
+    const path = `${profile.company_id}/${verificationType}-${Date.now()}.${ext}`;
     const { error: uploadError } = await supabase.storage
       .from("company-verification")
       .upload(path, verificationFile, { cacheControl: "3600", upsert: true });
+
     if (uploadError) {
       setError(uploadError.message);
       setUploadingVerification(false);
@@ -92,11 +140,12 @@ export default function CompanySettings() {
 
     const { data } = supabase.storage.from("company-verification").getPublicUrl(path);
     const { error: insertError } = await supabase.from("company_verification_documents").insert({
-      company_id: company.id,
+      company_id: profile.company_id,
       document_type: verificationType,
       file_url: data.publicUrl,
       uploaded_by: profile.id,
     });
+
     if (insertError) {
       setError(insertError.message);
       setUploadingVerification(false);
@@ -106,7 +155,8 @@ export default function CompanySettings() {
     const { error: companyError } = await supabase
       .from("companies")
       .update({ verification_status: "under_review" })
-      .eq("id", company.id);
+      .eq("id", profile.company_id);
+
     if (companyError) {
       setError(companyError.message);
       setUploadingVerification(false);
@@ -115,8 +165,9 @@ export default function CompanySettings() {
 
     setVerificationFile(null);
     setUploadingVerification(false);
+    await fetchCompanyData();
+    await refreshProfile();
     setMessage("Verification document uploaded. Company moved to under review.");
-    refreshProfile();
   };
 
   const handleGoogleSyncSave = async (event) => {
@@ -124,8 +175,9 @@ export default function CompanySettings() {
     setError("");
     setMessage("");
     setSavingSync(true);
+
     const { error: upsertError } = await supabase.from("google_workspace_integrations").upsert({
-      company_id: company.id,
+      company_id: profile.company_id,
       workspace_domain: googleIntegration.workspace_domain || null,
       drive_sync_enabled: googleIntegration.drive_sync_enabled,
       report_folder_id: googleIntegration.report_folder_id || null,
@@ -133,13 +185,21 @@ export default function CompanySettings() {
       service_account_email: googleIntegration.service_account_email || null,
       sync_status: googleIntegration.drive_sync_enabled ? "pending" : "not_connected",
     });
+
     setSavingSync(false);
+
     if (upsertError) {
       setError(upsertError.message);
       return;
     }
+
+    await fetchGoogleIntegration();
     setMessage("Google Workspace sync settings saved. Secure server-side credentials are required to complete live Drive sync.");
   };
+
+  if (loadingCompany) {
+    return <section className="panel empty-state">Loading company settings...</section>;
+  }
 
   return (
     <section className="grid-two responsive">
@@ -149,14 +209,14 @@ export default function CompanySettings() {
           <p>Review the workspace setup employees depend on for attendance and reporting.</p>
         </div>
         <div className="mini-card stack">
-          <p>Company Code: {company?.company_code}</p>
-          <p>Company Name: {company?.name}</p>
-          <p>GST Number: {company?.gst_number}</p>
-          <p>Phone: {company?.phone}</p>
-          <p>Attendance Radius: {company?.attendance_radius_meters ?? 200} meters</p>
-          <p>Drive Folder: {company?.google_drive_folder_url ? "Configured" : "Not configured"}</p>
-          <p>Verification Status: {company?.verification_status ?? "pending"}</p>
-          <p>Verification Notes: {company?.verification_notes ?? "No notes yet."}</p>
+          <p>Company Code: {companyRecord?.company_code}</p>
+          <p>Company Name: {companyRecord?.name}</p>
+          <p>GST Number: {companyRecord?.gst_number}</p>
+          <p>Phone: {companyRecord?.phone}</p>
+          <p>Attendance Radius: {companyRecord?.attendance_radius_meters ?? 200} meters</p>
+          <p>Drive Folder: {companyRecord?.google_drive_folder_url ? "Configured" : "Not configured"}</p>
+          <p>Verification Status: {companyRecord?.verification_status ?? "pending"}</p>
+          <p>Verification Notes: {companyRecord?.verification_notes ?? "No notes yet."}</p>
         </div>
       </div>
 

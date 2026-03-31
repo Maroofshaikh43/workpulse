@@ -1,30 +1,45 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useOutletContext } from "react-router-dom";
-import { calculateDistanceMeters, formatLongDate, formatTime, getToday } from "../utils";
+import { formatLongDate, formatTime, getToday } from "../utils";
+
+function getDistance(lat1, lng1, lat2, lng2) {
+  const earthRadius = 6371e3;
+  const phi1 = (lat1 * Math.PI) / 180;
+  const phi2 = (lat2 * Math.PI) / 180;
+  const deltaPhi = ((lat2 - lat1) * Math.PI) / 180;
+  const deltaLambda = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(deltaPhi / 2) * Math.sin(deltaPhi / 2) +
+    Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) * Math.sin(deltaLambda / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadius * c;
+}
 
 export default function Attendance() {
-  const { supabase, profile, company } = useOutletContext();
+  const { supabase, profile } = useOutletContext();
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const [todayAttendance, setTodayAttendance] = useState(null);
   const [registeredPhotoUrl, setRegisteredPhotoUrl] = useState("");
+  const [companyConfig, setCompanyConfig] = useState(null);
   const [selfiePreview, setSelfiePreview] = useState("");
   const [location, setLocation] = useState(null);
   const [distance, setDistance] = useState(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [pageLoading, setPageLoading] = useState(true);
   const [action, setAction] = useState("");
   const [cameraOpen, setCameraOpen] = useState(false);
 
-  const attendanceRadius = company?.attendance_radius_meters ?? 200;
+  const attendanceRadius = companyConfig?.attendance_radius_meters ?? 200;
   const officeReady = useMemo(
     () =>
-      company?.office_lat !== null &&
-      company?.office_lng !== null &&
-      company?.office_lat !== undefined &&
-      company?.office_lng !== undefined,
-    [company],
+      companyConfig?.office_lat !== null &&
+      companyConfig?.office_lng !== null &&
+      companyConfig?.office_lat !== undefined &&
+      companyConfig?.office_lng !== undefined,
+    [companyConfig],
   );
 
   const stopCamera = () => {
@@ -40,31 +55,47 @@ export default function Attendance() {
     setSelfiePreview("");
   };
 
-  const loadAttendancePage = async () => {
+  const fetchAttendancePageData = async () => {
+    if (!profile?.id || !profile?.company_id) return;
+
+    setPageLoading(true);
+
     const today = getToday();
-    const [{ data: attendanceData, error: attendanceError }, { data: userData, error: userError }] = await Promise.all([
+    const [
+      { data: attendanceData, error: attendanceError },
+      { data: userData, error: userError },
+      { data: freshCompany, error: companyError },
+    ] = await Promise.all([
       supabase.from("attendance").select("*").eq("user_id", profile.id).eq("date", today).maybeSingle(),
       supabase.from("users").select("profile_photo_url").eq("id", profile.id).single(),
+      supabase
+        .from("companies")
+        .select("office_lat, office_lng, attendance_radius_meters, status")
+        .eq("id", profile.company_id)
+        .single(),
     ]);
 
-    if (attendanceError) {
-      setError(attendanceError.message);
-      return;
-    }
-
-    if (userError) {
-      setError(userError.message);
-      return;
+    if (attendanceError || userError || companyError) {
+      setError(attendanceError?.message || userError?.message || companyError?.message || "Unable to load attendance data.");
+      setPageLoading(false);
+      return null;
     }
 
     setTodayAttendance(attendanceData ?? null);
     setRegisteredPhotoUrl(userData?.profile_photo_url ?? "");
+    setCompanyConfig(freshCompany ?? null);
+    setPageLoading(false);
+    return {
+      attendance: attendanceData ?? null,
+      profilePhotoUrl: userData?.profile_photo_url ?? "",
+      company: freshCompany ?? null,
+    };
   };
 
   useEffect(() => {
-    loadAttendancePage();
+    fetchAttendancePageData();
     return () => stopCamera();
-  }, []);
+  }, [profile?.id, profile?.company_id]);
 
   useEffect(() => {
     if (cameraOpen && videoRef.current && streamRef.current) {
@@ -97,7 +128,7 @@ export default function Attendance() {
     stopCamera();
   };
 
-  const verifyLocation = () => {
+  const verifyLocation = async () => {
     setError("");
     setMessage("");
     resetSelfie();
@@ -107,8 +138,19 @@ export default function Attendance() {
       return;
     }
 
-    if (!officeReady) {
-      setError("Admin must set the office GPS coordinates before attendance can be used.");
+    const freshData = await fetchAttendancePageData();
+    const nextCompany = freshData?.company ?? companyConfig;
+
+    if (
+      !nextCompany ||
+      nextCompany.office_lat === null ||
+      nextCompany.office_lat === undefined ||
+      nextCompany.office_lng === null ||
+      nextCompany.office_lng === undefined
+    ) {
+      setError(
+        "Your admin has not set the office location yet. Please contact your admin to set the office GPS coordinates in Company Settings.",
+      );
       return;
     }
 
@@ -118,11 +160,11 @@ export default function Attendance() {
           lat: position.coords.latitude,
           lng: position.coords.longitude,
         };
-        const nextDistance = calculateDistanceMeters(
+        const nextDistance = getDistance(
           nextLocation.lat,
           nextLocation.lng,
-          company.office_lat,
-          company.office_lng,
+          nextCompany.office_lat,
+          nextCompany.office_lng,
         );
 
         setLocation(nextLocation);
@@ -130,7 +172,7 @@ export default function Attendance() {
 
         if (nextDistance > attendanceRadius) {
           stopCamera();
-          setError(`You are ${Math.round(nextDistance)} meters away. Move within ${attendanceRadius} meters to continue.`);
+          setError(`You are ${Math.round(nextDistance)}m away from office. Must be within ${attendanceRadius}m to check in.`);
           return;
         }
 
@@ -191,7 +233,7 @@ export default function Attendance() {
 
     resetSelfie();
     setMessage(`Attendance marked successfully at ${formatTime(time)}.`);
-    loadAttendancePage();
+    await fetchAttendancePageData();
   };
 
   const handleCheckOut = async () => {
@@ -218,15 +260,22 @@ export default function Attendance() {
       .update({ check_out_time: checkoutTime })
       .eq("user_id", profile.id)
       .eq("date", getToday());
+
     setLoading(false);
     setAction("");
+
     if (updateError) {
       setError(updateError.message);
       return;
     }
+
     setMessage(`Check-out recorded successfully at ${formatTime(checkoutTime)}.`);
-    loadAttendancePage();
+    await fetchAttendancePageData();
   };
+
+  if (pageLoading) {
+    return <section className="panel empty-state">Loading attendance...</section>;
+  }
 
   return (
     <section className="page-stack">

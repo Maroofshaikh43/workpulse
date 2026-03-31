@@ -41,38 +41,16 @@ export default function SuperAdmin() {
   const [actionId, setActionId] = useState("");
   const [documentsCompanyId, setDocumentsCompanyId] = useState("");
   const [detailCompanyId, setDetailCompanyId] = useState("");
+  const [loading, setLoading] = useState(true);
 
-  const loadData = async () => {
-    const monthStart = getFirstDayOfCurrentMonth();
-    const today = getToday();
-    const [companiesResponse, documentsResponse, usersResponse, attendanceResponse] = await Promise.all([
-      supabase.from("companies").select("*").order("created_at", { ascending: false }),
-      supabase.from("company_verification_documents").select("*").order("created_at", { ascending: false }),
-      supabase
-        .from("users")
-        .select("id,company_id,name,email,phone,role,created_at,profile_photo_url,id_proof_url")
-        .order("created_at", { ascending: false }),
-      supabase.from("attendance").select("company_id,status,date,check_in_time,check_out_time").gte("date", monthStart).lte("date", today),
-    ]);
+  const fetchCompanies = async (allUsers = users) => {
+    const companiesResponse = await supabase.from("companies").select("*").order("created_at", { ascending: false });
 
     if (companiesResponse.error) {
       setError(companiesResponse.error.message);
-      return;
-    }
-    if (documentsResponse.error) {
-      setError(documentsResponse.error.message);
-      return;
-    }
-    if (usersResponse.error) {
-      setError(usersResponse.error.message);
-      return;
-    }
-    if (attendanceResponse.error) {
-      setError(attendanceResponse.error.message);
-      return;
+      return [];
     }
 
-    const allUsers = usersResponse.data ?? [];
     const employeeCounts = allUsers.reduce((accumulator, user) => {
       accumulator[user.company_id] = (accumulator[user.company_id] ?? 0) + 1;
       return accumulator;
@@ -91,20 +69,59 @@ export default function SuperAdmin() {
     }));
 
     setCompanies(nextCompanies);
-    setDocuments(documentsResponse.data ?? []);
-    setUsers(allUsers);
-    setAttendance(attendanceResponse.data ?? []);
     setNotes(
       nextCompanies.reduce((accumulator, company) => {
         accumulator[company.id] = company.verification_notes ?? "";
         return accumulator;
       }, {}),
     );
+    return nextCompanies;
+  };
+
+  const fetchData = async () => {
+    setLoading(true);
+    const monthStart = getFirstDayOfCurrentMonth();
+    const today = getToday();
+    const [documentsResponse, usersResponse, attendanceResponse] = await Promise.all([
+      supabase.from("company_verification_documents").select("*").order("created_at", { ascending: false }),
+      supabase
+        .from("users")
+        .select("id,company_id,name,email,phone,role,created_at,profile_photo_url,id_proof_url")
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("attendance")
+        .select("company_id,status,date,check_in_time,check_out_time")
+        .gte("date", monthStart)
+        .lte("date", today),
+    ]);
+
+    if (documentsResponse.error) {
+      setError(documentsResponse.error.message);
+      setLoading(false);
+      return;
+    }
+    if (usersResponse.error) {
+      setError(usersResponse.error.message);
+      setLoading(false);
+      return;
+    }
+    if (attendanceResponse.error) {
+      setError(attendanceResponse.error.message);
+      setLoading(false);
+      return;
+    }
+
+    const allUsers = usersResponse.data ?? [];
+    setDocuments(documentsResponse.data ?? []);
+    setUsers(allUsers);
+    setAttendance(attendanceResponse.data ?? []);
+    await fetchCompanies(allUsers);
+    setLoading(false);
   };
 
   useEffect(() => {
-    loadData();
-  }, []);
+    fetchData();
+  }, [supabase]);
 
   const usersByCompany = useMemo(
     () =>
@@ -211,16 +228,17 @@ export default function SuperAdmin() {
       updates.verification_status = "rejected";
     }
 
-    const { error: updateError } = await supabase.from("companies").update(updates).eq("id", company.id);
+    const { error: updateError } = await supabase.from("companies").update({ status: nextStatus, ...updates }).eq("id", company.id);
 
     setActionId("");
     if (updateError) {
+      console.error(updateError);
       setError(updateError.message);
       return;
     }
 
     setMessage(`Company status updated to ${nextStatus}.`);
-    loadData();
+    await fetchCompanies();
   };
 
   const renderActionButtons = (company) => (
@@ -257,7 +275,9 @@ export default function SuperAdmin() {
       {!!error && <div className="alert error">{error}</div>}
       {!!message && <div className="alert success">{message}</div>}
 
-      <div className="stat-grid">
+      {loading ? <div className="panel empty-state">Loading companies...</div> : null}
+
+      {!loading ? <div className="stat-grid">
         <div className="stat-card">
           <span>Total companies</span>
           <strong>{metrics.totalCompanies}</strong>
@@ -282,9 +302,9 @@ export default function SuperAdmin() {
           <span>Revenue indicator</span>
           <strong>{metrics.revenue}</strong>
         </div>
-      </div>
+      </div> : null}
 
-      <div className="panel">
+      {!loading ? <div className="panel">
         <div className="section-header">
           <h2>Company Management</h2>
           <p>Approve, suspend, reactivate, and review every company from one workspace.</p>
@@ -339,7 +359,7 @@ export default function SuperAdmin() {
             </tbody>
           </table>
         </div>
-      </div>
+      </div> : null}
 
       {documentsCompanyId && selectedCompany ? (
         <DetailModal title={`${selectedCompany.name} Documents`} onClose={() => setDocumentsCompanyId("")}>
