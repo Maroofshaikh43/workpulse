@@ -4,71 +4,79 @@ import { average, formatLongDate, getDateOffset, getDatesBetween, getToday, hour
 
 export default function Overview() {
   const { supabase, profile } = useOutletContext();
-  const [users, setUsers] = useState([]);
+  const [attendanceList, setAttendanceList] = useState([]);
   const [todayAttendance, setTodayAttendance] = useState([]);
   const [historyAttendance, setHistoryAttendance] = useState([]);
   const [reportSubmissions, setReportSubmissions] = useState([]);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
 
   const loadOverview = async () => {
+    setLoading(true);
     const twoWeeksAgo = getDateOffset(-13);
-    const [usersResponse, todayAttendanceResponse, historyAttendanceResponse, reportResponse] = await Promise.all([
-      supabase.from("users").select("id,name,department,is_active").eq("company_id", profile.company_id).eq("is_active", true),
+    const today = getToday();
+    const [employeesResponse, todayAttendanceResponse, historyAttendanceResponse, reportResponse] = await Promise.all([
+      supabase
+        .from("users")
+        .select("id,name,department,role,is_active")
+        .eq("company_id", profile.company_id)
+        .eq("is_active", true)
+        .in("role", ["employee", "hr", "admin"]),
       supabase.from("attendance").select("*").eq("company_id", profile.company_id).eq("date", getToday()),
       supabase.from("attendance").select("*").eq("company_id", profile.company_id).gte("date", twoWeeksAgo),
       supabase.from("daily_report_submissions").select("*").eq("company_id", profile.company_id).gte("date", twoWeeksAgo),
     ]);
 
-    if (usersResponse.error) {
-      setError(usersResponse.error.message);
+    if (employeesResponse.error) {
+      setError(employeesResponse.error.message);
+      setLoading(false);
       return;
     }
     if (todayAttendanceResponse.error) {
       setError(todayAttendanceResponse.error.message);
+      setLoading(false);
       return;
     }
     if (historyAttendanceResponse.error) {
       setError(historyAttendanceResponse.error.message);
+      setLoading(false);
       return;
     }
     if (reportResponse.error) {
       setError(reportResponse.error.message);
+      setLoading(false);
       return;
     }
 
-    setUsers(usersResponse.data ?? []);
+    const employees = employeesResponse.data ?? [];
+    const todayAttendance = todayAttendanceResponse.data ?? [];
+    const combined = employees.map((employee) => {
+      const record = todayAttendance.find((attendance) => attendance.user_id === employee.id);
+      return {
+        ...employee,
+        status: record ? record.status : "absent",
+        check_in: record?.check_in_time || "--",
+        check_out: record?.check_out_time || "--",
+      };
+    });
+
+    setAttendanceList(combined);
     setTodayAttendance(todayAttendanceResponse.data ?? []);
     setHistoryAttendance(historyAttendanceResponse.data ?? []);
     setReportSubmissions(reportResponse.data ?? []);
+    setLoading(false);
   };
 
   useEffect(() => {
     loadOverview();
   }, []);
 
-  const liveData = useMemo(() => {
-    const attendanceMap = todayAttendance.reduce((accumulator, item) => {
-      accumulator[item.user_id] = item;
-      return accumulator;
-    }, {});
-
-    return users.map((user) => {
-      const currentAttendance = attendanceMap[user.id];
-      if (!currentAttendance) return { ...user, liveStatus: "absent" };
-      return {
-        ...user,
-        liveStatus: currentAttendance.check_out_time ? "out" : "in",
-        check_in_time: currentAttendance.check_in_time,
-        check_out_time: currentAttendance.check_out_time,
-      };
-    });
-  }, [todayAttendance, users]);
-
   const smartAlerts = useMemo(() => {
     const alerts = [];
     const priorTwoDays = getDatesBetween(-2, -1);
     const currentWeek = getDatesBetween(-6, 0);
     const previousWeek = getDatesBetween(-13, -7);
+    const users = attendanceList;
 
     const attendanceByUser = historyAttendance.reduce((accumulator, item) => {
       if (!accumulator[item.user_id]) accumulator[item.user_id] = [];
@@ -154,7 +162,11 @@ export default function Overview() {
     }
 
     return alerts.slice(0, 6);
-  }, [historyAttendance, reportSubmissions, todayAttendance, users]);
+  }, [attendanceList, historyAttendance, reportSubmissions, todayAttendance]);
+
+  if (loading) {
+    return <section className="panel empty-state">Loading overview...</section>;
+  }
 
   return (
     <section className="page-stack">
@@ -191,18 +203,18 @@ export default function Overview() {
               </tr>
             </thead>
             <tbody>
-              {liveData.map((item) => (
+              {attendanceList.map((item) => (
                 <tr key={item.id}>
                   <td>{item.name}</td>
                   <td>{item.department}</td>
                   <td>
-                    <span className={`status-pill ${item.liveStatus}`}>{item.liveStatus}</span>
+                    <span className={`status-pill ${item.status}`}>{item.status}</span>
                   </td>
-                  <td>{formatTime(item.check_in_time)}</td>
-                  <td>{formatTime(item.check_out_time)}</td>
+                  <td>{formatTime(item.check_in)}</td>
+                  <td>{formatTime(item.check_out)}</td>
                 </tr>
               ))}
-              {!liveData.length && (
+              {!attendanceList.length && (
                 <tr>
                   <td colSpan="5" className="empty-cell">
                     No employee records found.

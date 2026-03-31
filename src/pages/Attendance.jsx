@@ -31,6 +31,7 @@ export default function Attendance() {
   const [pageLoading, setPageLoading] = useState(true);
   const [action, setAction] = useState("");
   const [cameraOpen, setCameraOpen] = useState(false);
+  const [attendanceState, setAttendanceState] = useState("not_checked_in");
 
   const attendanceRadius = companyConfig?.attendance_radius_meters ?? 200;
   const officeReady = useMemo(
@@ -84,6 +85,15 @@ export default function Attendance() {
     setTodayAttendance(attendanceData ?? null);
     setRegisteredPhotoUrl(userData?.profile_photo_url ?? "");
     setCompanyConfig(freshCompany ?? null);
+
+    if (attendanceData?.check_in_time && attendanceData?.check_out_time) {
+      setAttendanceState("completed");
+    } else if (attendanceData?.check_in_time && !attendanceData?.check_out_time) {
+      setAttendanceState("checked_in");
+    } else {
+      setAttendanceState("not_checked_in");
+    }
+
     setPageLoading(false);
     return {
       attendance: attendanceData ?? null,
@@ -203,6 +213,11 @@ export default function Attendance() {
       return;
     }
 
+    if (attendanceState !== "not_checked_in") {
+      setError("You have already checked in for today.");
+      return;
+    }
+
     setLoading(true);
     setAction("checkin");
     const now = new Date();
@@ -289,7 +304,7 @@ export default function Attendance() {
         <div className="stat-grid">
           <div className="stat-card">
             <span>Today</span>
-            <strong>{todayAttendance?.status ?? "Not marked"}</strong>
+            <strong>{attendanceState === "completed" ? "Completed" : todayAttendance?.status ?? "Not marked"}</strong>
           </div>
           <div className="stat-card">
             <span>Check In</span>
@@ -317,6 +332,20 @@ export default function Attendance() {
               <strong>Today's Date</strong>
               <p>{formatLongDate()}</p>
             </div>
+            {attendanceState === "checked_in" ? (
+              <div className="mini-card">
+                <strong>Already checked in</strong>
+                <p>You checked in at {formatTime(todayAttendance?.check_in_time)}</p>
+              </div>
+            ) : null}
+            {attendanceState === "completed" ? (
+              <div className="mini-card">
+                <strong>Attendance completed for today</strong>
+                <p>Check in: {formatTime(todayAttendance?.check_in_time)}</p>
+                <p>Check out: {formatTime(todayAttendance?.check_out_time)}</p>
+                <p>See you tomorrow!</p>
+              </div>
+            ) : null}
             <div className="mini-card">
               <strong>Your registered face</strong>
               {registeredPhotoUrl ? (
@@ -325,9 +354,11 @@ export default function Attendance() {
                 <p>Please upload profile photo in Profile settings before checking in</p>
               )}
             </div>
-            <button type="button" className="primary-button" onClick={verifyLocation}>
-              Verify GPS & Unlock Camera
-            </button>
+            {attendanceState === "not_checked_in" ? (
+              <button type="button" className="primary-button" onClick={verifyLocation}>
+                Verify GPS & Unlock Camera
+              </button>
+            ) : null}
             {location && (
               <div className="mini-card">
                 <p>
@@ -345,7 +376,7 @@ export default function Attendance() {
             <p>Compare your registered photo with a live selfie before final check-in.</p>
           </div>
 
-          {!cameraOpen && !selfiePreview && (
+          {!cameraOpen && !selfiePreview && attendanceState === "not_checked_in" && (
             <div className="empty-state">
               Camera stays locked until GPS verification succeeds inside the office radius.
             </div>
@@ -388,16 +419,18 @@ export default function Attendance() {
             </div>
           )}
 
-          <div className="row-end">
-            <button
-              type="button"
-              className="ghost-button"
-              onClick={handleCheckOut}
-              disabled={loading || !todayAttendance?.check_in_time}
-            >
-              {loading && action === "checkout" ? "Checking out..." : "Check Out"}
-            </button>
-          </div>
+          {attendanceState === "checked_in" ? (
+            <div className="row-end">
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={handleCheckOut}
+                disabled={loading || !todayAttendance?.check_in_time}
+              >
+                {loading && action === "checkout" ? "Checking out..." : "Check Out"}
+              </button>
+            </div>
+          ) : null}
         </div>
       </div>
     </section>
