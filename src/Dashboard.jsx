@@ -37,7 +37,7 @@ const navItems = {
   super_admin: [{ to: "super-admin", label: "Platform Control", icon: "platform" }],
 };
 
-export default function Dashboard({ supabase, profile, company, refreshProfile }) {
+export default function Dashboard({ supabase, profile, company, refreshProfile, onLogout }) {
   const navigate = useNavigate();
   const location = useLocation();
   const menuRef = useRef(null);
@@ -78,8 +78,27 @@ export default function Dashboard({ supabase, profile, company, refreshProfile }
     return () => window.clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    const checkStatus = async () => {
+      if (!profile?.company_id || profile.role === "super_admin") return;
+
+      const { data } = await supabase
+        .from("companies")
+        .select("status")
+        .eq("id", profile.company_id)
+        .single();
+
+      if (data?.status === "suspended" || data?.status === "rejected") {
+        await onLogout();
+        navigate("/login", { replace: true });
+      }
+    };
+
+    checkStatus();
+  }, [navigate, onLogout, profile?.company_id, profile?.role, supabase]);
+
   const handleLogout = async () => {
-    await supabase.auth.signOut();
+    await onLogout();
     navigate("/auth", { replace: true });
   };
 

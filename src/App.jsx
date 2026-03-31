@@ -42,14 +42,61 @@ function LoadingScreen({ label }) {
   );
 }
 
-function CompanyAccessScreen({ title, lines, onLogout }) {
+function BlockedScreen({ blockReason, onLogout }) {
+  const blockedState = {
+    suspended: {
+      accent: "#dc2626",
+      title: "Account Suspended",
+      lines: [
+        "Your account has been suspended due to a payment issue.",
+        "Contact support@workpulse.com",
+        "Your data is safe and will be restored upon payment.",
+      ],
+    },
+    rejected: {
+      accent: "#dc2626",
+      title: "Registration Rejected",
+      lines: [
+        "Your company registration was not approved.",
+        "Contact support@workpulse.com",
+      ],
+    },
+    pending: {
+      accent: "#d97706",
+      title: "Pending Approval",
+      lines: [
+        "Your company is under review.",
+        "We will notify you once approved.",
+      ],
+    },
+  }[blockReason];
+
+  if (!blockedState) return null;
+
   return (
     <div className="screen-centered">
       <div className="panel auth-panel access-state-panel">
-        <WorkPulseLogo large subtitle="Workforce operations platform" />
+        <span
+          aria-hidden="true"
+          style={{
+            width: 56,
+            height: 56,
+            borderRadius: 999,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: `${blockedState.accent}18`,
+            color: blockedState.accent,
+            fontSize: 28,
+            fontWeight: 700,
+            margin: "0 auto 12px",
+          }}
+        >
+          !
+        </span>
         <div className="stack">
-          <h1>{title}</h1>
-          {lines.map((line) => (
+          <h1>{blockedState.title}</h1>
+          {blockedState.lines.map((line) => (
             <p key={line}>{line}</p>
           ))}
         </div>
@@ -61,49 +108,11 @@ function CompanyAccessScreen({ title, lines, onLogout }) {
   );
 }
 
-function ProtectedRoute({ session, profile, company, loading, onLogout, children }) {
+function ProtectedRoute({ session, profile, loading, blockReason, onLogout, children }) {
   if (loading) return <LoadingScreen label="Preparing your workspace..." />;
   if (!session) return <Navigate to="/login" replace />;
+  if (blockReason) return <BlockedScreen blockReason={blockReason} onLogout={onLogout} />;
   if (!profile) return <LoadingScreen label="Loading your profile..." />;
-  if (profile.role !== "super_admin" && company?.status === "suspended") {
-    return (
-      <CompanyAccessScreen
-        title="Account Suspended"
-        lines={[
-          "Your account has been suspended due to a payment issue.",
-          "Please contact support@workpulse.com",
-          "Your data is safe.",
-        ]}
-        onLogout={onLogout}
-      />
-    );
-  }
-  if (profile.role !== "super_admin" && company?.status === "pending") {
-    return (
-      <CompanyAccessScreen
-        title="Account Pending Verification"
-        lines={[
-          "Your company is pending approval.",
-          "We will notify you once verified.",
-          "This usually takes 24 hours.",
-        ]}
-        onLogout={onLogout}
-      />
-    );
-  }
-  if (profile.role !== "super_admin" && company?.status === "rejected") {
-    return (
-      <CompanyAccessScreen
-        title="Company Registration Rejected"
-        lines={[
-          "Your company registration was rejected.",
-          "Please contact support@workpulse.com",
-          "for more information.",
-        ]}
-        onLogout={onLogout}
-      />
-    );
-  }
   return children;
 }
 
@@ -120,12 +129,14 @@ export default function App() {
   const [company, setCompany] = useState(null);
   const [loading, setLoading] = useState(true);
   const [authError, setAuthError] = useState("");
+  const [blockReason, setBlockReason] = useState("");
 
   const logout = async () => {
     await supabase.auth.signOut();
     setSession(null);
     setProfile(null);
     setCompany(null);
+    setBlockReason("");
   };
 
   const loadProfile = async (currentSession) => {
@@ -133,12 +144,14 @@ export default function App() {
       setProfile(null);
       setCompany(null);
       setAuthError("");
+      setBlockReason("");
       setLoading(false);
       return;
     }
 
     setLoading(true);
     setAuthError("");
+    setBlockReason("");
     const { data: superAdminData } = await supabase
       .from("platform_super_admins")
       .select("*")
@@ -158,11 +171,11 @@ export default function App() {
       return;
     }
 
-    const { data: userProfile, error: profileError } = await supabase
-      .from("users")
-      .select("*")
-      .eq("id", currentSession.user.id)
-      .single();
+      const { data: userProfile, error: profileError } = await supabase
+        .from("users")
+        .select("*, companies(status, name)")
+        .eq("id", currentSession.user.id)
+        .single();
 
     if (profileError) {
       setAuthError(profileError.message);
@@ -181,6 +194,41 @@ export default function App() {
       setCompany(null);
       setLoading(false);
       return;
+    }
+
+    const companyStatus = userProfile?.companies?.status;
+
+    if (userProfile.role !== "super_admin") {
+      if (companyStatus === "suspended") {
+        setCompany({
+          id: userProfile.company_id,
+          status: companyStatus,
+          name: userProfile?.companies?.name ?? "",
+        });
+        setBlockReason("suspended");
+        setLoading(false);
+        return;
+      }
+      if (companyStatus === "rejected") {
+        setCompany({
+          id: userProfile.company_id,
+          status: companyStatus,
+          name: userProfile?.companies?.name ?? "",
+        });
+        setBlockReason("rejected");
+        setLoading(false);
+        return;
+      }
+      if (companyStatus === "pending") {
+        setCompany({
+          id: userProfile.company_id,
+          status: companyStatus,
+          name: userProfile?.companies?.name ?? "",
+        });
+        setBlockReason("pending");
+        setLoading(false);
+        return;
+      }
     }
 
     if (userProfile.company_id) {
@@ -269,8 +317,8 @@ export default function App() {
           <ProtectedRoute
             session={session}
             profile={profile}
-            company={company}
             loading={loading}
+            blockReason={blockReason}
             onLogout={logout}
           >
             <Dashboard
@@ -278,6 +326,7 @@ export default function App() {
               profile={profile}
               company={company}
               refreshProfile={() => loadProfile(session)}
+              onLogout={logout}
             />
           </ProtectedRoute>
         }
