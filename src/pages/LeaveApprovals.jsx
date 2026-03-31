@@ -7,6 +7,7 @@ export default function LeaveApprovals() {
   const [requests, setRequests] = useState([]);
   const [usersMap, setUsersMap] = useState({});
   const [error, setError] = useState("");
+  const [actionId, setActionId] = useState("");
 
   const loadRequests = async () => {
     const [leaveResponse, userResponse] = await Promise.all([
@@ -39,10 +40,12 @@ export default function LeaveApprovals() {
   }, []);
 
   const updateStatus = async (requestId, status) => {
+    setActionId(`${requestId}-${status}`);
     const { error: updateError } = await supabase
       .from("leaves")
       .update({ status, reviewed_by: profile.id })
       .eq("id", requestId);
+    setActionId("");
     if (updateError) {
       setError(updateError.message);
       return;
@@ -84,11 +87,11 @@ export default function LeaveApprovals() {
                 <td>
                   {item.status === "pending" ? (
                     <div className="action-row">
-                      <button type="button" className="link-button" onClick={() => updateStatus(item.id, "approved")}>
-                        Approve
+                      <button type="button" className="link-button" onClick={() => updateStatus(item.id, "approved")} disabled={actionId === `${item.id}-approved`}>
+                        {actionId === `${item.id}-approved` ? "Approving..." : "Approve"}
                       </button>
-                      <button type="button" className="link-button danger" onClick={() => updateStatus(item.id, "rejected")}>
-                        Reject
+                      <button type="button" className="link-button danger" onClick={() => updateStatus(item.id, "rejected")} disabled={actionId === `${item.id}-rejected`}>
+                        {actionId === `${item.id}-rejected` ? "Rejecting..." : "Reject"}
                       </button>
                     </div>
                   ) : (

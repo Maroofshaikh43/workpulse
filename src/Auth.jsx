@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 
 function initialEmployeeForm() {
   return {
@@ -22,7 +23,11 @@ function hasRecoveryTokens() {
   return hash.includes("type=recovery") || search.includes("type=recovery");
 }
 
+const EMAIL_CONFIRMATION_MESSAGE =
+  "Account created! Please check your email and click the confirmation link to activate your account. Only confirmed accounts can log in.";
+
 export default function Auth({ supabase, authError, onRegistered }) {
+  const navigate = useNavigate();
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const [mode, setMode] = useState("login");
@@ -48,11 +53,11 @@ export default function Auth({ supabase, authError, onRegistered }) {
   const [employeeForm, setEmployeeForm] = useState(initialEmployeeForm());
 
   const title = useMemo(() => {
-    if (mode === "admin") return "Launch Your Company Workspace";
-    if (mode === "employee-code" || mode === "employee-details") return "Verified Employee Onboarding";
-    if (mode === "forgot-password") return "Reset Access";
-    if (mode === "reset-password") return "Set A New Password";
-    return "Sign In Securely";
+    if (mode === "admin") return "Register as Admin";
+    if (mode === "employee-code" || mode === "employee-details") return "Register as Employee";
+    if (mode === "forgot-password") return "Reset Password";
+    if (mode === "reset-password") return "Create New Password";
+    return "Login";
   }, [mode]);
 
   useEffect(() => {
@@ -99,6 +104,37 @@ export default function Auth({ supabase, authError, onRegistered }) {
       streamRef.current = null;
     }
     setCameraReady(false);
+  };
+
+  const findExistingUserRole = async (email) => {
+    const normalizedEmail = email.trim().toLowerCase();
+    const { data, error } = await supabase.from("users").select("role").eq("email", normalizedEmail).maybeSingle();
+
+    if (error) throw error;
+    return data?.role ?? null;
+  };
+
+  const getRoleDestination = async (userId) => {
+    const { data: superAdminData, error: superAdminError } = await supabase
+      .from("platform_super_admins")
+      .select("id")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (superAdminError) throw superAdminError;
+    if (superAdminData) return "/super-admin";
+
+    const { data: userData, error: userError } = await supabase
+      .from("users")
+      .select("role")
+      .eq("id", userId)
+      .single();
+
+    if (userError) throw userError;
+
+    if (userData.role === "employee") return "/app/attendance";
+    if (userData.role === "admin" || userData.role === "hr") return "/app/overview";
+    return "/app";
   };
 
   const generateCompanyCode = async () => {
@@ -161,17 +197,27 @@ export default function Auth({ supabase, authError, onRegistered }) {
     event.preventDefault();
     resetMessages();
     setLoading(true);
-    const { error: signInError } = await supabase.auth.signInWithPassword(loginForm);
-    setLoading(false);
-    if (signInError) {
-      if (signInError.message.toLowerCase().includes("email not confirmed")) {
+    try {
+      const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+        email: loginForm.email.trim().toLowerCase(),
+        password: loginForm.password,
+      });
+
+      if (signInError) throw signInError;
+      if (!signInData.user) throw new Error("We could not load your account.");
+
+      const destination = await getRoleDestination(signInData.user.id);
+      setMessage("Login successful. Loading your dashboard...");
+      navigate(destination, { replace: true });
+    } catch (signInError) {
+      if (signInError.message?.toLowerCase().includes("email not confirmed")) {
         setError("Verify your email from the confirmation link before signing in.");
-        return;
+      } else {
+        setError(signInError.message);
       }
-      setError(signInError.message);
-      return;
+    } finally {
+      setLoading(false);
     }
-    setMessage("Login successful. Loading your dashboard...");
   };
 
   const handleForgotPassword = async (event) => {
@@ -180,7 +226,7 @@ export default function Auth({ supabase, authError, onRegistered }) {
     setLoading(true);
 
     const { error: resetError } = await supabase.auth.resetPasswordForEmail(forgotPasswordEmail, {
-      redirectTo: `${window.location.origin}/auth`,
+      redirectTo: "http://localhost:5173/reset-password",
     });
 
     setLoading(false);
@@ -189,7 +235,7 @@ export default function Auth({ supabase, authError, onRegistered }) {
       return;
     }
 
-    setMessage("Password reset link sent. Check your email to continue.");
+    setMessage("Password reset link sent! Check your email inbox.");
   };
 
   const handleResetPassword = async (event) => {
@@ -218,7 +264,7 @@ export default function Auth({ supabase, authError, onRegistered }) {
     }
 
     setResetPasswordForm({ password: "", confirmPassword: "" });
-    window.history.replaceState({}, document.title, "/auth");
+    window.history.replaceState({}, document.title, "/login");
     setMode("login");
     setMessage("Your password has been updated. Sign in with your new password.");
   };
@@ -255,10 +301,28 @@ export default function Auth({ supabase, authError, onRegistered }) {
     setLoading(true);
 
     try {
+      const normalizedEmail = adminForm.email.trim().toLowerCase();
+      const existingRole = await findExistingUserRole(normalizedEmail);
+
+      if (existingRole === "employee") {
+        throw new Error("This email is already registered as an Employee. Please use the Login button.");
+      }
+
+      if (existingRole === "hr") {
+        throw new Error("This email is already registered with your company workspace. Please use the Login button.");
+      }
+
+      if (existingRole === "admin") {
+        throw new Error("This email is already registered as a Company Admin. Please use the Login button.");
+      }
+
       const companyCode = await generateCompanyCode();
       const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-        email: adminForm.email,
+        email: normalizedEmail,
         password: adminForm.password,
+        options: {
+          emailRedirectTo: `${window.location.origin}/login`,
+        },
       });
       if (signUpError) throw signUpError;
       if (!signUpData.user) throw new Error("Supabase did not return a user for the admin registration.");
@@ -281,14 +345,17 @@ export default function Auth({ supabase, authError, onRegistered }) {
         id: signUpData.user.id,
         company_id: companyData.id,
         name: adminForm.companyName,
-        email: adminForm.email,
+        email: normalizedEmail,
         phone: adminForm.phone,
         department: "Management",
         role: "admin",
         is_active: true,
       });
 
-      if (profileError) throw profileError;
+      if (profileError) {
+        await supabase.auth.signOut();
+        throw new Error("We could not finish setting up this company admin account. Please try again.");
+      }
 
       const verificationDocs = [];
       if (adminForm.businessProof) {
@@ -328,7 +395,7 @@ export default function Auth({ supabase, authError, onRegistered }) {
       await supabase.auth.signOut();
       onRegistered();
       setSuccessCode(companyCode);
-      setMessage("Admin account created. Company verification is now pending super-admin review.");
+      setMessage(EMAIL_CONFIRMATION_MESSAGE);
       setAdminForm({
         companyName: "",
         gstNumber: "",
@@ -352,7 +419,7 @@ export default function Auth({ supabase, authError, onRegistered }) {
     setLoading(true);
     const { data, error: verifyError } = await supabase
       .from("companies")
-      .select("id,name,company_code,verification_status")
+      .select("id,name,company_code,verification_status,status")
       .eq("company_code", companyCodeInput)
       .single();
     setLoading(false);
@@ -360,8 +427,12 @@ export default function Auth({ supabase, authError, onRegistered }) {
       setError("Invalid company code.");
       return;
     }
-    if (data.verification_status !== "verified") {
-      setError("This company is not verified yet. Employees can join only after super-admin approval.");
+    if (data.status && data.status !== "approved") {
+      setError("This company is not active yet. Employees can join only after approval.");
+      return;
+    }
+    if (!data.status && data.verification_status !== "verified") {
+      setError("This company is not verified yet. Employees can join only after approval.");
       return;
     }
     setVerifiedCompany(data);
@@ -385,6 +456,21 @@ export default function Auth({ supabase, authError, onRegistered }) {
     setLoading(true);
 
     try {
+      const normalizedEmail = employeeForm.email.trim().toLowerCase();
+      const existingRole = await findExistingUserRole(normalizedEmail);
+
+      if (existingRole === "admin") {
+        throw new Error("This email is already registered as a Company Admin. Please use the Login button.");
+      }
+
+      if (existingRole === "hr") {
+        throw new Error("This email is already registered with your company workspace. Please use the Login button.");
+      }
+
+      if (existingRole === "employee") {
+        throw new Error("This email is already registered as an Employee. Please use the Login button.");
+      }
+
       const tempUploadKey = crypto.randomUUID();
       const profilePhotoUrl = await uploadFile(
         "profile-photos",
@@ -403,10 +489,10 @@ export default function Auth({ supabase, authError, onRegistered }) {
       }
 
       const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-        email: employeeForm.email,
+        email: normalizedEmail,
         password: employeeForm.password,
         options: {
-          emailRedirectTo: `${window.location.origin}/auth`,
+          emailRedirectTo: `${window.location.origin}/login`,
         },
       });
       if (signUpError) throw signUpError;
@@ -416,7 +502,7 @@ export default function Auth({ supabase, authError, onRegistered }) {
         id: signUpData.user.id,
         company_id: verifiedCompany.id,
         name: employeeForm.name,
-        email: employeeForm.email,
+        email: normalizedEmail,
         phone: employeeForm.phone,
         department: employeeForm.department,
         role: "employee",
@@ -424,12 +510,14 @@ export default function Auth({ supabase, authError, onRegistered }) {
         id_proof_url: idProofUrl,
         is_active: true,
       });
-      if (insertError) throw insertError;
+      if (insertError) {
+        await supabase.auth.signOut();
+        throw new Error("We could not finish creating this employee account. Please try again.");
+      }
 
       await supabase.auth.signOut();
-
       onRegistered();
-      setMessage("Registration saved. Verify your email before signing in.");
+      setMessage(EMAIL_CONFIRMATION_MESSAGE);
       setEmployeeForm(initialEmployeeForm());
       setVerifiedCompany(null);
       setCompanyCodeInput("");
@@ -442,430 +530,376 @@ export default function Auth({ supabase, authError, onRegistered }) {
   };
 
   return (
-    <div className="screen-centered auth-screen">
-      <div className="auth-hero">
-        <div className="brand-pill">Trusted Attendance Infrastructure For Modern Teams</div>
-        <div className="hero-kicker">WorkPulse</div>
-        <h1>HR operations, attendance control, and daily execution in one secure workspace.</h1>
-        <p>
-          Built for companies that need accountable attendance, role-based control, verified onboarding,
-          and a cleaner way to run people operations without spreadsheets and WhatsApp follow-ups.
-        </p>
+    <div className="auth-route-shell">
+      <header className="marketing-header auth-header">
+        <Link to="/" className="public-brand">
+          <span className="public-brand-mark">WP</span>
+          <span className="public-brand-text">WorkPulse</span>
+        </Link>
+      </header>
 
-        <div className="hero-proofbar">
-          <div>
-            <strong>GPS + face checks</strong>
-            <span>Attendance only inside approved office range</span>
+      <div className="auth-center">
+        <aside className="auth-showcase">
+          <Link to="/" className="public-brand">
+            <span className="public-brand-mark">WP</span>
+            <span className="public-brand-text">WorkPulse</span>
+          </Link>
+          <div className="stack">
+            <h2>Operations software your team will enjoy using.</h2>
+            <p>WorkPulse gives growing companies one clean place to run attendance, approvals, and workforce workflows.</p>
           </div>
-          <div>
-            <strong>Super-admin review</strong>
-            <span>Company verification before employee onboarding</span>
-          </div>
-          <div>
-            <strong>Built for scale</strong>
-            <span>Multi-company roles, assets, alerts, and reporting</span>
-          </div>
-        </div>
+          <ul className="auth-bullet-list">
+            <li>Attendance and HR workflows in one system</li>
+            <li>Role-based access for admins, HR, and employees</li>
+            <li>Clean reporting, payroll, and approval tracking</li>
+          </ul>
+        </aside>
 
-        <div className="hero-grid">
-          <div className="mini-card feature-card">
-            <div className="card-chip">Secure onboarding</div>
-            <strong>Verified employee access</strong>
-            <p>Company-code registration, live profile capture, email confirmation, and admin-controlled roles.</p>
-          </div>
-          <div className="mini-card feature-card">
-            <div className="card-chip">Operational visibility</div>
-            <strong>Attendance with context</strong>
-            <p>GPS-gated check-in, checkout guardrails, leave review flows, and real-time dashboard monitoring.</p>
-          </div>
-          <div className="mini-card feature-card">
-            <div className="card-chip">Manager control</div>
-            <strong>Reports, assets, and alerts</strong>
-            <p>Smart alerts, asset assignments, salary records, notifications, and linked reporting workflows.</p>
-          </div>
-        </div>
-      </div>
-
-      <div className="panel auth-panel">
-        <div className="panel-ribbon">
-          <span>Production Workspace</span>
-          <span>Role Based</span>
-          <span>Verification Ready</span>
-        </div>
-        <div className="auth-switcher">
-          <button
-            className={mode === "login" ? "active" : ""}
-            type="button"
-            onClick={() => {
-              resetMessages();
-              resetCamera();
-              setMode("login");
-            }}
-          >
-            Login
-          </button>
-          <button
-            className={mode === "admin" ? "active" : ""}
-            type="button"
-            onClick={() => {
-              resetMessages();
-              resetCamera();
-              setMode("admin");
-            }}
-          >
-            Admin Register
-          </button>
-          <button
-            className={mode.startsWith("employee") ? "active" : ""}
-            type="button"
-            onClick={() => {
-              resetMessages();
-              resetCamera();
-              setMode("employee-code");
-            }}
-          >
-            Employee Register
-          </button>
-        </div>
-
-        <div className="section-header">
-          <h2>{title}</h2>
-          <p>Clean onboarding and access control designed for actual company operations.</p>
-        </div>
-
-        {!!authError && <div className="alert error">{authError}</div>}
-        {!!error && <div className="alert error">{error}</div>}
-        {!!message && <div className="alert success">{message}</div>}
-        {!!successCode && (
-          <div className="alert success">
-            Your company code is <strong>{successCode}</strong>. Share it with your team for onboarding.
-          </div>
-        )}
-
-        {mode === "login" && (
-          <form onSubmit={handleLogin} className="stack">
-            <label>
-              Email
-              <input
-                type="email"
-                value={loginForm.email}
-                onChange={(event) => setLoginForm((current) => ({ ...current, email: event.target.value }))}
-                required
-              />
-            </label>
-            <label>
-              Password
-              <input
-                type="password"
-                value={loginForm.password}
-                onChange={(event) => setLoginForm((current) => ({ ...current, password: event.target.value }))}
-                required
-              />
-            </label>
-            <button className="primary-button" type="submit" disabled={loading}>
-              {loading ? "Signing In..." : "Login"}
-            </button>
-            <div className="row-between">
-              <button
-                type="button"
-                className="text-button"
-                onClick={() => {
-                  resetMessages();
-                  setForgotPasswordEmail(loginForm.email);
-                  setMode("forgot-password");
-                }}
-              >
-                Forgot Password?
-              </button>
-              <button type="button" className="text-button" onClick={handleResendVerification} disabled={loading}>
-                Resend Verification Email
-              </button>
+        <div className="auth-form-panel">
+          <div className="auth-minimal-card">
+            <div className="auth-card-brand">
+              <span className="public-brand-mark">WP</span>
+              <strong>WorkPulse</strong>
             </div>
-          </form>
-        )}
 
-        {mode === "forgot-password" && (
-          <form onSubmit={handleForgotPassword} className="stack">
-            <label>
-              Work Email
-              <input
-                type="email"
-                value={forgotPasswordEmail}
-                onChange={(event) => setForgotPasswordEmail(event.target.value)}
-                required
-              />
-            </label>
-            <button className="primary-button" type="submit" disabled={loading}>
-              {loading ? "Sending Reset Link..." : "Send Reset Link"}
-            </button>
-            <button
-              type="button"
-              className="text-button"
-              onClick={() => {
-                resetMessages();
-                setMode("login");
-              }}
-            >
-              Back To Login
-            </button>
-          </form>
-        )}
-
-        {mode === "reset-password" && (
-          <form onSubmit={handleResetPassword} className="stack">
-            <label>
-              New Password
-              <input
-                type="password"
-                value={resetPasswordForm.password}
-                onChange={(event) =>
-                  setResetPasswordForm((current) => ({ ...current, password: event.target.value }))
-                }
-                required
-              />
-            </label>
-            <label>
-              Confirm New Password
-              <input
-                type="password"
-                value={resetPasswordForm.confirmPassword}
-                onChange={(event) =>
-                  setResetPasswordForm((current) => ({ ...current, confirmPassword: event.target.value }))
-                }
-                required
-              />
-            </label>
-            <button className="primary-button" type="submit" disabled={loading}>
-              {loading ? "Updating Password..." : "Update Password"}
-            </button>
-          </form>
-        )}
-
-        {mode === "admin" && (
-          <form onSubmit={handleAdminRegister} className="stack">
-            <div className="grid-two">
-              <label>
-                Company Name
-                <input
-                  value={adminForm.companyName}
-                  onChange={(event) =>
-                    setAdminForm((current) => ({ ...current, companyName: event.target.value }))
-                  }
-                  required
-                />
-              </label>
-              <label>
-                GST Number
-                <input
-                  value={adminForm.gstNumber}
-                  onChange={(event) => setAdminForm((current) => ({ ...current, gstNumber: event.target.value }))}
-                  required
-                />
-              </label>
-              <label>
-                Phone
-                <input
-                  value={adminForm.phone}
-                  onChange={(event) => setAdminForm((current) => ({ ...current, phone: event.target.value }))}
-                  required
-                />
-              </label>
-              <label>
-                Email
-                <input
-                  type="email"
-                  value={adminForm.email}
-                  onChange={(event) => setAdminForm((current) => ({ ...current, email: event.target.value }))}
-                  required
-                />
-              </label>
+            <div className="section-header auth-card-header">
+              <h1>{mode === "login" ? "Welcome back" : title}</h1>
+              <p>Secure access for your team workspace.</p>
             </div>
-            <label>
-              Password
-              <input
-                type="password"
-                value={adminForm.password}
-                onChange={(event) => setAdminForm((current) => ({ ...current, password: event.target.value }))}
-                required
-              />
-            </label>
-            <div className="grid-two">
-              <label>
-                Business Registration Proof
-                <input
-                  type="file"
-                  accept="image/*,.pdf"
-                  onChange={(event) =>
-                    setAdminForm((current) => ({ ...current, businessProof: event.target.files?.[0] ?? null }))
-                  }
-                  required
-                />
-              </label>
-              <label>
-                GST Certificate
-                <input
-                  type="file"
-                  accept="image/*,.pdf"
-                  onChange={(event) =>
-                    setAdminForm((current) => ({ ...current, gstProof: event.target.files?.[0] ?? null }))
-                  }
-                />
-              </label>
-            </div>
-            <button className="primary-button" type="submit" disabled={loading}>
-              {loading ? "Creating Company..." : "Create Admin Account"}
-            </button>
-          </form>
-        )}
 
-        {mode === "employee-code" && (
-          <form onSubmit={handleVerifyCompanyCode} className="stack">
-            <label>
-              10 Digit Company Code
-              <input
-                inputMode="numeric"
-                minLength={10}
-                maxLength={10}
-                value={companyCodeInput}
-                onChange={(event) => setCompanyCodeInput(event.target.value.replace(/\D/g, "").slice(0, 10))}
-                required
-              />
-            </label>
-            <button className="primary-button" type="submit" disabled={loading}>
-              {loading ? "Verifying..." : "Verify Company Code"}
-            </button>
-          </form>
-        )}
-
-        {mode === "employee-details" && verifiedCompany && (
-          <form onSubmit={handleEmployeeRegister} className="stack">
-            <div className="inline-banner">
-              <strong>{verifiedCompany.name}</strong>
-              <span>Email verification is required before first login.</span>
-            </div>
-            <div className="grid-two">
-              <label>
-                Full Name
-                <input
-                  value={employeeForm.name}
-                  onChange={(event) => setEmployeeForm((current) => ({ ...current, name: event.target.value }))}
-                  required
-                />
-              </label>
-              <label>
-                Work Email
-                <input
-                  type="email"
-                  value={employeeForm.email}
-                  onChange={(event) => setEmployeeForm((current) => ({ ...current, email: event.target.value }))}
-                  required
-                />
-              </label>
-              <label>
-                Phone
-                <input
-                  value={employeeForm.phone}
-                  onChange={(event) => setEmployeeForm((current) => ({ ...current, phone: event.target.value }))}
-                  required
-                />
-              </label>
-              <label>
-                Department
-                <input
-                  value={employeeForm.department}
-                  onChange={(event) =>
-                    setEmployeeForm((current) => ({ ...current, department: event.target.value }))
-                  }
-                  required
-                />
-              </label>
-            </div>
-            <label>
-              Password
-              <input
-                type="password"
-                value={employeeForm.password}
-                onChange={(event) => setEmployeeForm((current) => ({ ...current, password: event.target.value }))}
-                required
-              />
-            </label>
-
-            <div className="camera-onboarding">
-              <div className="section-header">
-                <h3>Live Profile Capture</h3>
-                <p>Profile photos must come from your live camera. File uploads are not allowed.</p>
+            {!!authError && <div className="alert error">{authError}</div>}
+            {!!error && <div className="alert error">{error}</div>}
+            {!!message && <div className="alert success">{message}</div>}
+            {!!successCode && (
+              <div className="alert success">
+                Company code: <strong>{successCode}</strong>
               </div>
-              {!cameraReady && !employeeForm.profilePhotoPreview && (
-                <button type="button" className="ghost-button" onClick={openProfileCamera}>
-                  Open Live Camera
+            )}
+
+            {mode === "login" && (
+              <form onSubmit={handleLogin} className="stack">
+                <label>
+                  Email
+                  <input
+                    type="email"
+                    value={loginForm.email}
+                    onChange={(event) => setLoginForm((current) => ({ ...current, email: event.target.value }))}
+                    required
+                  />
+                </label>
+                <label>
+                  Password
+                  <input
+                    type="password"
+                    value={loginForm.password}
+                    onChange={(event) => setLoginForm((current) => ({ ...current, password: event.target.value }))}
+                    required
+                  />
+                </label>
+                <button className="primary-button full-width" type="submit" disabled={loading}>
+                  {loading ? "Signing In..." : "Login"}
                 </button>
-              )}
-              {cameraReady && (
-                <div className="camera-card">
-                  <video ref={videoRef} autoPlay playsInline className="camera-view" />
-                  <div className="row-end">
-                    <button type="button" className="ghost-button" onClick={resetCamera}>
-                      Cancel
-                    </button>
-                    <button type="button" className="primary-button" onClick={captureProfilePhoto}>
-                      Capture Profile Photo
-                    </button>
-                  </div>
+                <div className="auth-link-list">
+                  <button type="button" className="text-button" onClick={() => setMode("admin")}>
+                    Register a Company
+                  </button>
+                  <button type="button" className="text-button" onClick={() => setMode("employee-code")}>
+                    Register as Employee
+                  </button>
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={() => {
+                      resetMessages();
+                      setForgotPasswordEmail(loginForm.email);
+                      setMode("forgot-password");
+                    }}
+                  >
+                    Forgot Password
+                  </button>
+                  <button type="button" className="text-button" onClick={handleResendVerification} disabled={loading}>
+                    Resend Verification
+                  </button>
                 </div>
-              )}
-              {employeeForm.profilePhotoPreview && (
-                <div className="capture-result">
-                  <img src={employeeForm.profilePhotoPreview} alt="Live profile capture preview" className="photo-preview" />
-                  <div className="mini-card">
-                    <strong>Live capture ready</strong>
-                    <p>This image will be stored as the employee profile photo after signup completes.</p>
-                    <button
-                      type="button"
-                      className="ghost-button"
-                      onClick={() =>
-                        setEmployeeForm((current) => ({
-                          ...current,
-                          profilePhoto: null,
-                          profilePhotoPreview: "",
-                        }))
-                      }
-                    >
-                      Retake Photo
-                    </button>
+              </form>
+            )}
+
+            {mode === "forgot-password" && (
+              <form onSubmit={handleForgotPassword} className="stack">
+                <label>
+                  Email
+                  <input
+                    type="email"
+                    value={forgotPasswordEmail}
+                    onChange={(event) => setForgotPasswordEmail(event.target.value)}
+                    required
+                  />
+                </label>
+                <button className="primary-button full-width" type="submit" disabled={loading}>
+                  {loading ? "Sending..." : "Send Reset Link"}
+                </button>
+                <button type="button" className="text-button" onClick={() => setMode("login")}>
+                  Back to Login
+                </button>
+              </form>
+            )}
+
+            {mode === "reset-password" && (
+              <form onSubmit={handleResetPassword} className="stack">
+                <label>
+                  New Password
+                  <input
+                    type="password"
+                    value={resetPasswordForm.password}
+                    onChange={(event) =>
+                      setResetPasswordForm((current) => ({ ...current, password: event.target.value }))
+                    }
+                    required
+                  />
+                </label>
+                <label>
+                  Confirm Password
+                  <input
+                    type="password"
+                    value={resetPasswordForm.confirmPassword}
+                    onChange={(event) =>
+                      setResetPasswordForm((current) => ({ ...current, confirmPassword: event.target.value }))
+                    }
+                    required
+                  />
+                </label>
+                <button className="primary-button full-width" type="submit" disabled={loading}>
+                  {loading ? "Updating..." : "Update Password"}
+                </button>
+              </form>
+            )}
+
+          {mode === "admin" && (
+            <form onSubmit={handleAdminRegister} className="stack">
+              <div className="grid-two">
+                <label>
+                  Company Name
+                  <input
+                    value={adminForm.companyName}
+                    onChange={(event) =>
+                      setAdminForm((current) => ({ ...current, companyName: event.target.value }))
+                    }
+                    required
+                  />
+                </label>
+                <label>
+                  GST Number
+                  <input
+                    value={adminForm.gstNumber}
+                    onChange={(event) => setAdminForm((current) => ({ ...current, gstNumber: event.target.value }))}
+                    required
+                  />
+                </label>
+                <label>
+                  Phone
+                  <input
+                    value={adminForm.phone}
+                    onChange={(event) => setAdminForm((current) => ({ ...current, phone: event.target.value }))}
+                    required
+                  />
+                </label>
+                <label>
+                  Email
+                  <input
+                    type="email"
+                    value={adminForm.email}
+                    onChange={(event) => setAdminForm((current) => ({ ...current, email: event.target.value }))}
+                    required
+                  />
+                </label>
+              </div>
+              <label>
+                Password
+                <input
+                  type="password"
+                  value={adminForm.password}
+                  onChange={(event) => setAdminForm((current) => ({ ...current, password: event.target.value }))}
+                  required
+                />
+              </label>
+              <div className="grid-two">
+                <label>
+                  Business Proof
+                  <input
+                    type="file"
+                    accept="image/*,.pdf"
+                    onChange={(event) =>
+                      setAdminForm((current) => ({ ...current, businessProof: event.target.files?.[0] ?? null }))
+                    }
+                    required
+                  />
+                </label>
+                <label>
+                  GST Certificate
+                  <input
+                    type="file"
+                    accept="image/*,.pdf"
+                    onChange={(event) =>
+                      setAdminForm((current) => ({ ...current, gstProof: event.target.files?.[0] ?? null }))
+                    }
+                  />
+                </label>
+              </div>
+              <button className="primary-button full-width" type="submit" disabled={loading}>
+                {loading ? "Creating..." : "Create Admin Account"}
+              </button>
+              <button type="button" className="text-button" onClick={() => setMode("login")}>
+                Back to Login
+              </button>
+            </form>
+          )}
+
+          {mode === "employee-code" && (
+            <form onSubmit={handleVerifyCompanyCode} className="stack">
+              <label>
+                Company Code
+                <input
+                  inputMode="numeric"
+                  minLength={10}
+                  maxLength={10}
+                  value={companyCodeInput}
+                  onChange={(event) => setCompanyCodeInput(event.target.value.replace(/\D/g, "").slice(0, 10))}
+                  required
+                />
+              </label>
+              <button className="primary-button full-width" type="submit" disabled={loading}>
+                {loading ? "Verifying..." : "Verify Company Code"}
+              </button>
+              <button type="button" className="text-button" onClick={() => setMode("login")}>
+                Back to Login
+              </button>
+            </form>
+          )}
+
+          {mode === "employee-details" && verifiedCompany && (
+            <form onSubmit={handleEmployeeRegister} className="stack">
+              <div className="inline-banner">
+                <strong>{verifiedCompany.name}</strong>
+                <span>Email verification is required before first login.</span>
+              </div>
+              <div className="grid-two">
+                <label>
+                  Full Name
+                  <input
+                    value={employeeForm.name}
+                    onChange={(event) => setEmployeeForm((current) => ({ ...current, name: event.target.value }))}
+                    required
+                  />
+                </label>
+                <label>
+                  Work Email
+                  <input
+                    type="email"
+                    value={employeeForm.email}
+                    onChange={(event) => setEmployeeForm((current) => ({ ...current, email: event.target.value }))}
+                    required
+                  />
+                </label>
+                <label>
+                  Phone
+                  <input
+                    value={employeeForm.phone}
+                    onChange={(event) => setEmployeeForm((current) => ({ ...current, phone: event.target.value }))}
+                    required
+                  />
+                </label>
+                <label>
+                  Department
+                  <input
+                    value={employeeForm.department}
+                    onChange={(event) =>
+                      setEmployeeForm((current) => ({ ...current, department: event.target.value }))
+                    }
+                    required
+                  />
+                </label>
+              </div>
+              <label>
+                Password
+                <input
+                  type="password"
+                  value={employeeForm.password}
+                  onChange={(event) => setEmployeeForm((current) => ({ ...current, password: event.target.value }))}
+                  required
+                />
+              </label>
+              <div className="camera-onboarding">
+                {!cameraReady && !employeeForm.profilePhotoPreview && (
+                  <button type="button" className="ghost-button" onClick={openProfileCamera}>
+                    Open Live Camera
+                  </button>
+                )}
+                {cameraReady && (
+                  <div className="camera-card">
+                    <video ref={videoRef} autoPlay playsInline className="camera-view" />
+                    <div className="row-end">
+                      <button type="button" className="ghost-button" onClick={resetCamera}>
+                        Cancel
+                      </button>
+                      <button type="button" className="primary-button" onClick={captureProfilePhoto}>
+                        Capture Photo
+                      </button>
+                    </div>
                   </div>
-                </div>
-              )}
-            </div>
-
-            <label>
-              Photo ID
-              <input
-                type="file"
-                accept="image/*,.pdf"
-                onChange={(event) =>
-                  setEmployeeForm((current) => ({ ...current, idProof: event.target.files?.[0] ?? null }))
-                }
-              />
-            </label>
-
-            <div className="row-end">
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => {
-                  resetCamera();
-                  setMode("employee-code");
-                  setVerifiedCompany(null);
-                }}
-              >
-                Back
-              </button>
-              <button className="primary-button" type="submit" disabled={loading}>
-                {loading ? "Registering..." : "Create Employee Account"}
-              </button>
-            </div>
-          </form>
-        )}
+                )}
+                {employeeForm.profilePhotoPreview && (
+                  <div className="capture-result">
+                    <img src={employeeForm.profilePhotoPreview} alt="Live profile capture preview" className="photo-preview" />
+                    <div className="mini-card">
+                      <strong>Live capture ready</strong>
+                      <p>This image will be stored as the employee profile photo after signup completes.</p>
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        onClick={() =>
+                          setEmployeeForm((current) => ({
+                            ...current,
+                            profilePhoto: null,
+                            profilePhotoPreview: "",
+                          }))
+                        }
+                      >
+                        Retake Photo
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+              <label>
+                Photo ID
+                <input
+                  type="file"
+                  accept="image/*,.pdf"
+                  onChange={(event) =>
+                    setEmployeeForm((current) => ({ ...current, idProof: event.target.files?.[0] ?? null }))
+                  }
+                />
+              </label>
+              <div className="row-end">
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => {
+                    resetCamera();
+                    setMode("employee-code");
+                    setVerifiedCompany(null);
+                  }}
+                >
+                  Back
+                </button>
+                <button className="primary-button" type="submit" disabled={loading}>
+                  {loading ? "Registering..." : "Create Employee Account"}
+                </button>
+              </div>
+            </form>
+          )}
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useOutletContext } from "react-router-dom";
-import { formatDate, getToday } from "../utils";
+import { formatDate, formatLongDate, getToday } from "../utils";
 
 export default function DailyReport() {
   const { supabase, profile, company } = useOutletContext();
   const [submission, setSubmission] = useState(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
 
   const loadSubmission = async () => {
     const { data, error: submissionError } = await supabase
@@ -41,9 +42,11 @@ export default function DailyReport() {
   const markComplete = async () => {
     setError("");
     setMessage("");
+    setSaving(true);
 
     if (!profile?.daily_report_drive_url) {
       setError("No employee Drive report link has been assigned yet.");
+      setSaving(false);
       return;
     }
 
@@ -57,6 +60,7 @@ export default function DailyReport() {
       },
       { onConflict: "user_id,date" },
     );
+    setSaving(false);
 
     if (upsertError) {
       setError(upsertError.message);
@@ -72,7 +76,7 @@ export default function DailyReport() {
       <div className="panel">
         <div className="section-header">
           <h2>Google Drive Reporting</h2>
-          <p>Daily reporting now happens in Drive so each employee works inside a company-owned document.</p>
+          <p>{formatLongDate()}.</p>
         </div>
         <div className="mini-card stack">
           <strong>How this works</strong>
@@ -100,6 +104,10 @@ export default function DailyReport() {
             <p>{profile?.daily_report_drive_url ?? "Not assigned yet."}</p>
           </div>
           <div className="mini-card">
+            <strong>Report Date</strong>
+            <p>{formatLongDate()}</p>
+          </div>
+          <div className="mini-card">
             <strong>Today's Submission</strong>
             <p>
               {submission
@@ -118,8 +126,8 @@ export default function DailyReport() {
                 Open My Drive Report
               </a>
             )}
-            <button type="button" className="ghost-button" onClick={markComplete} disabled={!profile?.daily_report_drive_url}>
-              Mark Today's Report Complete
+            <button type="button" className="ghost-button" onClick={markComplete} disabled={!profile?.daily_report_drive_url || saving}>
+              {saving ? "Saving..." : "Mark Today's Report Complete"}
             </button>
           </div>
         </div>

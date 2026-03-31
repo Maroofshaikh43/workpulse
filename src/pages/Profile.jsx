@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useOutletContext } from "react-router-dom";
-import { formatDate, hoursBetween } from "../utils";
+import { countWorkingDaysBetween, formatDate, getFirstDayOfCurrentMonth, getToday, hoursBetween } from "../utils";
 
 export default function Profile() {
   const { supabase, profile } = useOutletContext();
@@ -9,13 +9,18 @@ export default function Profile() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    const startOfMonth = new Date();
-    startOfMonth.setDate(1);
-    const start = startOfMonth.toISOString().slice(0, 10);
+    const start = getFirstDayOfCurrentMonth();
+    const today = getToday();
 
     const loadAttendance = async () => {
       const [attendanceResponse, assetResponse] = await Promise.all([
-        supabase.from("attendance").select("*").eq("user_id", profile.id).gte("date", start).order("date", { ascending: false }),
+        supabase
+          .from("attendance")
+          .select("*")
+          .eq("user_id", profile.id)
+          .gte("date", start)
+          .lte("date", today)
+          .order("date", { ascending: false }),
         supabase.from("assets").select("*").eq("assigned_to", profile.id).order("created_at", { ascending: false }),
       ]);
       if (attendanceResponse.error) {
@@ -31,17 +36,19 @@ export default function Profile() {
     };
 
     loadAttendance();
-  }, []);
+  }, [profile.id, supabase]);
 
   const summary = useMemo(() => {
     const present = attendance.filter((item) => item.status === "present").length;
     const late = attendance.filter((item) => item.status === "late").length;
-    const absent = Math.max(0, new Date().getDate() - present - late);
+    const workingDays = countWorkingDaysBetween(getFirstDayOfCurrentMonth(), getToday());
+    const absent = Math.max(0, workingDays - present - late);
+    const completedDays = attendance.filter((item) => item.check_in_time && item.check_out_time);
     const avgHours =
-      attendance.length === 0
+      completedDays.length === 0
         ? 0
-        : attendance.reduce((sum, item) => sum + hoursBetween(item.check_in_time, item.check_out_time), 0) /
-          attendance.length;
+        : completedDays.reduce((sum, item) => sum + hoursBetween(item.check_in_time, item.check_out_time), 0) /
+          completedDays.length;
     return { present, late, absent, avgHours };
   }, [attendance]);
 

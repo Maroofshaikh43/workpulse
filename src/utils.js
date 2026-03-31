@@ -1,3 +1,14 @@
+function pad(value) {
+  return String(value).padStart(2, "0");
+}
+
+export function toLocalDateValue(date = new Date()) {
+  const year = date.getFullYear();
+  const month = pad(date.getMonth() + 1);
+  const day = pad(date.getDate());
+  return `${year}-${month}-${day}`;
+}
+
 export function formatDate(value) {
   if (!value) return "--";
   return new Date(value).toLocaleDateString(undefined, {
@@ -27,14 +38,43 @@ export function formatDateTime(value) {
   });
 }
 
+export function formatLongDate(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  return date.toLocaleDateString("en-GB", {
+    weekday: "long",
+    day: "2-digit",
+    month: "long",
+    year: "numeric",
+  });
+}
+
+export function formatLiveDateTime(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  const datePart = date.toLocaleDateString("en-GB", {
+    weekday: "long",
+    day: "2-digit",
+    month: "long",
+    year: "numeric",
+  });
+  const timePart = date.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
+  return `${datePart}  |  ${timePart}`;
+}
+
 export function getToday() {
-  return new Date().toISOString().slice(0, 10);
+  return toLocalDateValue(new Date());
 }
 
 export function getDateOffset(days) {
   const date = new Date();
   date.setDate(date.getDate() + days);
-  return date.toISOString().slice(0, 10);
+  return toLocalDateValue(date);
 }
 
 export function getDatesBetween(startOffset, endOffset) {
@@ -94,7 +134,7 @@ export function getWeekdayBuckets() {
     const date = new Date(today);
     date.setDate(today.getDate() - i);
     dates.push({
-      key: date.toISOString().slice(0, 10),
+      key: toLocalDateValue(date),
       label: date.toLocaleDateString(undefined, { weekday: "short" }),
     });
   }
@@ -111,4 +151,24 @@ export function hoursBetween(checkIn, checkOut) {
   const start = new Date(`1970-01-01T${checkIn}`);
   const end = new Date(`1970-01-01T${checkOut}`);
   return Math.max(0, (end.getTime() - start.getTime()) / 3600000);
+}
+
+export function getFirstDayOfCurrentMonth() {
+  const date = new Date();
+  return toLocalDateValue(new Date(date.getFullYear(), date.getMonth(), 1));
+}
+
+export function countWorkingDaysBetween(startValue, endValue) {
+  const start = new Date(startValue);
+  const end = new Date(endValue);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) return 0;
+
+  let count = 0;
+  const cursor = new Date(start);
+  while (cursor <= end) {
+    const day = cursor.getDay();
+    if (day !== 0 && day !== 6) count += 1;
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return count;
 }

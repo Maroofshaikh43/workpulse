@@ -1,26 +1,58 @@
 import { useEffect, useMemo, useState } from "react";
 import { useOutletContext } from "react-router-dom";
-import { formatDate } from "../utils";
+import { formatDate, getFirstDayOfCurrentMonth, getToday, hoursBetween } from "../utils";
+
+function isPreviewableImage(url = "") {
+  return /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(url);
+}
+
+function normalizeCompanyStatus(status, verificationStatus) {
+  if (status) return status;
+  if (verificationStatus === "verified") return "approved";
+  if (verificationStatus === "rejected") return "rejected";
+  return "pending";
+}
+
+function DetailModal({ title, onClose, children }) {
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <div className="modal-panel">
+        <div className="modal-header">
+          <h2>{title}</h2>
+          <button type="button" className="ghost-button" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        <div className="modal-body">{children}</div>
+      </div>
+    </div>
+  );
+}
 
 export default function SuperAdmin() {
-  const { supabase } = useOutletContext();
+  const { supabase, profile } = useOutletContext();
   const [companies, setCompanies] = useState([]);
   const [documents, setDocuments] = useState([]);
-  const [notifications, setNotifications] = useState([]);
-  const [assets, setAssets] = useState([]);
-  const [googleIntegrations, setGoogleIntegrations] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [attendance, setAttendance] = useState([]);
   const [notes, setNotes] = useState({});
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [actionId, setActionId] = useState("");
+  const [documentsCompanyId, setDocumentsCompanyId] = useState("");
+  const [detailCompanyId, setDetailCompanyId] = useState("");
 
   const loadData = async () => {
-    const [companiesResponse, documentsResponse, usersResponse, notificationsResponse, assetsResponse, googleResponse] = await Promise.all([
+    const monthStart = getFirstDayOfCurrentMonth();
+    const today = getToday();
+    const [companiesResponse, documentsResponse, usersResponse, attendanceResponse] = await Promise.all([
       supabase.from("companies").select("*").order("created_at", { ascending: false }),
       supabase.from("company_verification_documents").select("*").order("created_at", { ascending: false }),
-      supabase.from("users").select("id,company_id").order("created_at", { ascending: false }),
-      supabase.from("notifications").select("*"),
-      supabase.from("assets").select("*"),
-      supabase.from("google_workspace_integrations").select("*"),
+      supabase
+        .from("users")
+        .select("id,company_id,name,email,phone,role,created_at,profile_photo_url,id_proof_url")
+        .order("created_at", { ascending: false }),
+      supabase.from("attendance").select("company_id,status,date,check_in_time,check_out_time").gte("date", monthStart).lte("date", today),
     ]);
 
     if (companiesResponse.error) {
@@ -35,36 +67,35 @@ export default function SuperAdmin() {
       setError(usersResponse.error.message);
       return;
     }
-    if (notificationsResponse.error) {
-      setError(notificationsResponse.error.message);
-      return;
-    }
-    if (assetsResponse.error) {
-      setError(assetsResponse.error.message);
-      return;
-    }
-    if (googleResponse.error) {
-      setError(googleResponse.error.message);
+    if (attendanceResponse.error) {
+      setError(attendanceResponse.error.message);
       return;
     }
 
-    const counts = (usersResponse.data ?? []).reduce((accumulator, user) => {
+    const allUsers = usersResponse.data ?? [];
+    const employeeCounts = allUsers.reduce((accumulator, user) => {
       accumulator[user.company_id] = (accumulator[user.company_id] ?? 0) + 1;
       return accumulator;
     }, {});
 
-    const companyRows = (companiesResponse.data ?? []).map((company) => ({
+    const ownerMap = allUsers.reduce((accumulator, user) => {
+      if (user.role === "admin" && !accumulator[user.company_id]) accumulator[user.company_id] = user;
+      return accumulator;
+    }, {});
+
+    const nextCompanies = (companiesResponse.data ?? []).map((company) => ({
       ...company,
-      employee_count: counts[company.id] ?? 0,
+      status: normalizeCompanyStatus(company.status, company.verification_status),
+      employee_count: employeeCounts[company.id] ?? 0,
+      owner: ownerMap[company.id] ?? allUsers.find((user) => user.company_id === company.id) ?? null,
     }));
 
-    setCompanies(companyRows);
+    setCompanies(nextCompanies);
     setDocuments(documentsResponse.data ?? []);
-    setNotifications(notificationsResponse.data ?? []);
-    setAssets(assetsResponse.data ?? []);
-    setGoogleIntegrations(googleResponse.data ?? []);
+    setUsers(allUsers);
+    setAttendance(attendanceResponse.data ?? []);
     setNotes(
-      companyRows.reduce((accumulator, company) => {
+      nextCompanies.reduce((accumulator, company) => {
         accumulator[company.id] = company.verification_notes ?? "";
         return accumulator;
       }, {}),
@@ -74,6 +105,16 @@ export default function SuperAdmin() {
   useEffect(() => {
     loadData();
   }, []);
+
+  const usersByCompany = useMemo(
+    () =>
+      users.reduce((accumulator, user) => {
+        if (!accumulator[user.company_id]) accumulator[user.company_id] = [];
+        accumulator[user.company_id].push(user);
+        return accumulator;
+      }, {}),
+    [users],
+  );
 
   const docsByCompany = useMemo(
     () =>
@@ -85,22 +126,131 @@ export default function SuperAdmin() {
     [documents],
   );
 
-  const updateStatus = async (companyId, verificationStatus) => {
+  const attendanceByCompany = useMemo(
+    () =>
+      attendance.reduce((accumulator, row) => {
+        if (!accumulator[row.company_id]) accumulator[row.company_id] = [];
+        accumulator[row.company_id].push(row);
+        return accumulator;
+      }, {}),
+    [attendance],
+  );
+
+  const metrics = useMemo(() => {
+    const totalEmployees = companies.reduce((sum, company) => sum + company.employee_count, 0);
+    return {
+      totalCompanies: companies.length,
+      pending: companies.filter((company) => company.status === "pending").length,
+      active: companies.filter((company) => company.status === "approved").length,
+      suspended: companies.filter((company) => company.status === "suspended").length,
+      totalEmployees,
+      revenue: `INR ${companies.filter((company) => company.status === "approved").length * 4900}/mo`,
+    };
+  }, [companies]);
+
+  const selectedCompany = useMemo(
+    () => companies.find((company) => company.id === detailCompanyId || company.id === documentsCompanyId) ?? null,
+    [companies, detailCompanyId, documentsCompanyId],
+  );
+
+  const companyDocumentItems = useMemo(() => {
+    if (!selectedCompany) return [];
+
+    const verificationDocs = (docsByCompany[selectedCompany.id] ?? []).map((doc) => ({
+      id: doc.id,
+      title: doc.document_type.replaceAll("_", " "),
+      url: doc.file_url,
+      type: "Company document",
+    }));
+
+    const employeeDocs = (usersByCompany[selectedCompany.id] ?? [])
+      .filter((user) => user.id_proof_url)
+      .map((user) => ({
+        id: `id-proof-${user.id}`,
+        title: `${user.name} ID proof`,
+        url: user.id_proof_url,
+        type: "Employee ID proof",
+      }));
+
+    return [...verificationDocs, ...employeeDocs];
+  }, [docsByCompany, selectedCompany, usersByCompany]);
+
+  const detailStats = useMemo(() => {
+    if (!selectedCompany) return null;
+    const rows = attendanceByCompany[selectedCompany.id] ?? [];
+    const today = getToday();
+    const completedRows = rows.filter((row) => row.check_in_time && row.check_out_time);
+    const avgHours =
+      completedRows.length > 0
+        ? completedRows.reduce((sum, row) => sum + hoursBetween(row.check_in_time, row.check_out_time), 0) / completedRows.length
+        : 0;
+
+    return {
+      present: rows.filter((row) => row.status === "present").length,
+      late: rows.filter((row) => row.status === "late").length,
+      todayMarked: rows.filter((row) => row.date === today).length,
+      avgHours,
+    };
+  }, [attendanceByCompany, selectedCompany]);
+
+  const updateCompanyStatus = async (company, nextStatus) => {
     setError("");
     setMessage("");
+    setActionId(`${company.id}-${nextStatus}`);
+
     const updates = {
-      verification_status: verificationStatus,
-      verification_notes: notes[companyId] || null,
-      verified_at: verificationStatus === "verified" ? new Date().toISOString() : null,
+      status: nextStatus,
+      verification_notes: notes[company.id] || null,
+      verified_by: profile.id,
     };
-    const { error: updateError } = await supabase.from("companies").update(updates).eq("id", companyId);
+
+    if (nextStatus === "approved") {
+      updates.verification_status = "verified";
+      updates.verified_at = new Date().toISOString();
+    } else if (nextStatus === "rejected") {
+      updates.verification_status = "rejected";
+    }
+
+    const { error: updateError } = await supabase.from("companies").update(updates).eq("id", company.id);
+
+    setActionId("");
     if (updateError) {
       setError(updateError.message);
       return;
     }
-    setMessage(`Company marked as ${verificationStatus}.`);
+
+    setMessage(`Company status updated to ${nextStatus}.`);
     loadData();
   };
+
+  const renderActionButtons = (company) => (
+    <div className="action-column">
+      <button
+        type="button"
+        className="primary-button"
+        onClick={() => updateCompanyStatus(company, "approved")}
+        disabled={company.status === "approved" || actionId === `${company.id}-approved`}
+      >
+        {actionId === `${company.id}-approved` ? "Saving..." : company.status === "suspended" ? "Reactivate" : "Approve"}
+      </button>
+      <button
+        type="button"
+        className="ghost-button"
+        onClick={() => updateCompanyStatus(company, "suspended")}
+        disabled={company.status !== "approved" || actionId === `${company.id}-suspended`}
+      >
+        {actionId === `${company.id}-suspended` ? "Suspending..." : "Suspend"}
+      </button>
+      <button
+        type="button"
+        className="link-button danger"
+        onClick={() => updateCompanyStatus(company, "rejected")}
+        disabled={company.status === "rejected" || actionId === `${company.id}-rejected`}
+      >
+        {actionId === `${company.id}-rejected` ? "Rejecting..." : "Reject"}
+      </button>
+    </div>
+  );
 
   return (
     <section className="page-stack">
@@ -109,59 +259,47 @@ export default function SuperAdmin() {
 
       <div className="stat-grid">
         <div className="stat-card">
-          <span>Total Companies</span>
-          <strong>{companies.length}</strong>
+          <span>Total companies</span>
+          <strong>{metrics.totalCompanies}</strong>
         </div>
         <div className="stat-card">
-          <span>Active Users</span>
-          <strong>{companies.reduce((sum, item) => sum + item.employee_count, 0)}</strong>
+          <span>Pending approval</span>
+          <strong>{metrics.pending}</strong>
         </div>
         <div className="stat-card">
-          <span>Pending Review</span>
-          <strong>{companies.filter((item) => ["pending", "under_review"].includes(item.verification_status)).length}</strong>
+          <span>Active companies</span>
+          <strong>{metrics.active}</strong>
         </div>
         <div className="stat-card">
-          <span>Verified</span>
-          <strong>{companies.filter((item) => item.verification_status === "verified").length}</strong>
+          <span>Suspended companies</span>
+          <strong>{metrics.suspended}</strong>
         </div>
         <div className="stat-card">
-          <span>Verification Backlog</span>
-          <strong>{companies.filter((item) => item.verification_status !== "verified").length}</strong>
+          <span>Total employees</span>
+          <strong>{metrics.totalEmployees}</strong>
         </div>
         <div className="stat-card">
-          <span>Churn Risk</span>
-          <strong>{companies.filter((item) => item.employee_count < 3 && item.verification_status === "verified").length}</strong>
-        </div>
-        <div className="stat-card">
-          <span>Total Assets</span>
-          <strong>{assets.length}</strong>
-        </div>
-        <div className="stat-card">
-          <span>Notifications</span>
-          <strong>{notifications.length}</strong>
-        </div>
-        <div className="stat-card">
-          <span>Drive Sync Ready</span>
-          <strong>{googleIntegrations.filter((item) => item.sync_status === "connected").length}</strong>
+          <span>Revenue indicator</span>
+          <strong>{metrics.revenue}</strong>
         </div>
       </div>
 
       <div className="panel">
         <div className="section-header">
-          <h2>Platform Company Review</h2>
-          <p>Review business documents, approve verified companies, and control which companies can onboard employees.</p>
+          <h2>Company Management</h2>
+          <p>Approve, suspend, reactivate, and review every company from one workspace.</p>
         </div>
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Company</th>
+                <th>Company name</th>
+                <th>GST number</th>
+                <th>Owner email</th>
+                <th>Registered date</th>
+                <th>Employee count</th>
                 <th>Status</th>
-                <th>Employees</th>
-                <th>Created</th>
-                <th>Documents</th>
-                <th>Notes</th>
-                <th>Action</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -171,42 +309,21 @@ export default function SuperAdmin() {
                     <strong>{company.name}</strong>
                     <div className="table-subtext">{company.company_code}</div>
                   </td>
-                  <td>
-                    <span className={`status-pill ${company.verification_status}`}>
-                      {company.verification_status}
-                    </span>
-                  </td>
-                  <td>{company.employee_count}</td>
+                  <td>{company.gst_number}</td>
+                  <td>{company.owner?.email ?? "--"}</td>
                   <td>{formatDate(company.created_at)}</td>
+                  <td>{company.employee_count}</td>
                   <td>
-                    <div className="docs-list">
-                      {(docsByCompany[company.id] ?? []).map((doc) => (
-                        <a key={doc.id} href={doc.file_url} target="_blank" rel="noreferrer" className="link-button">
-                          {doc.document_type}
-                        </a>
-                      ))}
-                      {!(docsByCompany[company.id] ?? []).length && <span className="table-subtext">No documents</span>}
-                    </div>
-                  </td>
-                  <td>
-                    <textarea
-                      rows="3"
-                      value={notes[company.id] ?? ""}
-                      onChange={(event) =>
-                        setNotes((current) => ({ ...current, [company.id]: event.target.value }))
-                      }
-                    />
+                    <span className={`status-pill ${company.status}`}>{company.status}</span>
                   </td>
                   <td>
                     <div className="action-column">
-                      <button type="button" className="ghost-button" onClick={() => updateStatus(company.id, "under_review")}>
-                        Review
+                      {renderActionButtons(company)}
+                      <button type="button" className="ghost-button" onClick={() => setDocumentsCompanyId(company.id)}>
+                        View Documents
                       </button>
-                      <button type="button" className="primary-button" onClick={() => updateStatus(company.id, "verified")}>
-                        Verify
-                      </button>
-                      <button type="button" className="link-button danger" onClick={() => updateStatus(company.id, "rejected")}>
-                        Reject
+                      <button type="button" className="ghost-button" onClick={() => setDetailCompanyId(company.id)}>
+                        View Details
                       </button>
                     </div>
                   </td>
@@ -223,6 +340,134 @@ export default function SuperAdmin() {
           </table>
         </div>
       </div>
+
+      {documentsCompanyId && selectedCompany ? (
+        <DetailModal title={`${selectedCompany.name} Documents`} onClose={() => setDocumentsCompanyId("")}>
+          <div className="document-grid">
+            {companyDocumentItems.map((doc) => (
+              <article key={doc.id} className="mini-card document-card">
+                <strong>{doc.title}</strong>
+                <span className="table-subtext">{doc.type}</span>
+                {isPreviewableImage(doc.url) ? <img src={doc.url} alt={doc.title} className="document-preview" /> : null}
+                <div className="row-end">
+                  <a className="ghost-button" href={doc.url} target="_blank" rel="noreferrer">
+                    Open
+                  </a>
+                  <a className="primary-button" href={doc.url} download>
+                    Download
+                  </a>
+                </div>
+              </article>
+            ))}
+            {!companyDocumentItems.length ? <div className="empty-state">No documents uploaded for this company yet.</div> : null}
+          </div>
+        </DetailModal>
+      ) : null}
+
+      {detailCompanyId && selectedCompany ? (
+        <DetailModal title={selectedCompany.name} onClose={() => setDetailCompanyId("")}>
+          <div className="page-stack">
+            <div className="grid-two responsive">
+              <div className="mini-card stack">
+                <strong>Company info</strong>
+                <p>Name: {selectedCompany.name}</p>
+                <p>GST: {selectedCompany.gst_number}</p>
+                <p>Phone: {selectedCompany.phone}</p>
+                <p>Email: {selectedCompany.owner?.email ?? "--"}</p>
+                <p>Registered: {formatDate(selectedCompany.created_at)}</p>
+                <p>Status: {selectedCompany.status}</p>
+              </div>
+
+              <div className="mini-card stack">
+                <strong>Registered admin face</strong>
+                {selectedCompany.owner?.profile_photo_url ? (
+                  <img
+                    src={selectedCompany.owner.profile_photo_url}
+                    alt={`${selectedCompany.owner.name} profile`}
+                    className="document-preview"
+                  />
+                ) : (
+                  <p>No admin face photo uploaded yet.</p>
+                )}
+              </div>
+            </div>
+
+            <div className="stat-grid">
+              <div className="stat-card">
+                <span>Present records</span>
+                <strong>{detailStats?.present ?? 0}</strong>
+              </div>
+              <div className="stat-card">
+                <span>Late records</span>
+                <strong>{detailStats?.late ?? 0}</strong>
+              </div>
+              <div className="stat-card">
+                <span>Attendance today</span>
+                <strong>{detailStats?.todayMarked ?? 0}</strong>
+              </div>
+              <div className="stat-card">
+                <span>Avg hours</span>
+                <strong>{(detailStats?.avgHours ?? 0).toFixed(1)}</strong>
+              </div>
+            </div>
+
+            <div className="mini-card stack">
+              <strong>Verification notes</strong>
+              <textarea
+                rows="4"
+                value={notes[selectedCompany.id] ?? ""}
+                onChange={(event) => setNotes((current) => ({ ...current, [selectedCompany.id]: event.target.value }))}
+              />
+              <div className="row-end">{renderActionButtons(selectedCompany)}</div>
+            </div>
+
+            <div className="mini-card stack">
+              <strong>Employees</strong>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Role</th>
+                      <th>Email</th>
+                      <th>Join date</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(usersByCompany[selectedCompany.id] ?? []).map((user) => (
+                      <tr key={user.id}>
+                        <td>{user.name}</td>
+                        <td>{user.role}</td>
+                        <td>{user.email}</td>
+                        <td>{formatDate(user.created_at)}</td>
+                      </tr>
+                    ))}
+                    {!(usersByCompany[selectedCompany.id] ?? []).length ? (
+                      <tr>
+                        <td colSpan="4" className="empty-cell">
+                          No employees found for this company.
+                        </td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="mini-card stack">
+              <strong>Documents uploaded</strong>
+              <div className="docs-list">
+                {companyDocumentItems.map((doc) => (
+                  <a key={doc.id} href={doc.url} target="_blank" rel="noreferrer" className="link-button">
+                    {doc.title}
+                  </a>
+                ))}
+                {!companyDocumentItems.length ? <span className="table-subtext">No documents uploaded.</span> : null}
+              </div>
+            </div>
+          </div>
+        </DetailModal>
+      ) : null}
     </section>
   );
 }

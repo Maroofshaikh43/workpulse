@@ -15,6 +15,7 @@ export default function Broadcast() {
   const [form, setForm] = useState(defaultForm);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [sending, setSending] = useState(false);
 
   const loadMessages = async () => {
     const [broadcastResponse, usersResponse] = await Promise.all([
@@ -43,6 +44,7 @@ export default function Broadcast() {
     event.preventDefault();
     setMessage("");
     setError("");
+    setSending(true);
     const { error: insertError } = await supabase.from("broadcasts").insert({
       sender_id: profile.id,
       company_id: profile.company_id,
@@ -50,6 +52,7 @@ export default function Broadcast() {
       subject: form.subject,
       body: form.body,
     });
+    setSending(false);
     if (insertError) {
       setError(insertError.message);
       return;
@@ -96,8 +99,8 @@ export default function Broadcast() {
               required
             />
           </label>
-          <button className="primary-button" type="submit">
-            Send Broadcast
+          <button className="primary-button" type="submit" disabled={sending}>
+            {sending ? "Sending..." : "Send Broadcast"}
           </button>
         </form>
       </div>

@@ -6,6 +6,7 @@ export default function RoleManagement() {
   const [users, setUsers] = useState([]);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [updatingUserId, setUpdatingUserId] = useState("");
 
   const loadUsers = async () => {
     const { data, error: userError } = await supabase
@@ -25,7 +26,9 @@ export default function RoleManagement() {
   }, []);
 
   const updateRole = async (userId, role) => {
+    setUpdatingUserId(userId);
     const { error: updateError } = await supabase.from("users").update({ role }).eq("id", userId);
+    setUpdatingUserId("");
     if (updateError) {
       setError(updateError.message);
       return;
@@ -61,7 +64,7 @@ export default function RoleManagement() {
                 <td>{user.department}</td>
                 <td>{user.is_active ? "Yes" : "No"}</td>
                 <td>
-                  <select value={user.role} onChange={(event) => updateRole(user.id, event.target.value)}>
+                  <select value={user.role} onChange={(event) => updateRole(user.id, event.target.value)} disabled={updatingUserId === user.id}>
                     <option value="employee">employee</option>
                     <option value="hr">hr</option>
                     <option value="admin">admin</option>

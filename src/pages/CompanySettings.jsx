@@ -16,6 +16,9 @@ export default function CompanySettings() {
   const [error, setError] = useState("");
   const [verificationFile, setVerificationFile] = useState(null);
   const [verificationType, setVerificationType] = useState("business_registration");
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [uploadingVerification, setUploadingVerification] = useState(false);
+  const [savingSync, setSavingSync] = useState(false);
   const [googleIntegration, setGoogleIntegration] = useState({
     workspace_domain: "",
     drive_sync_enabled: false,
@@ -42,6 +45,7 @@ export default function CompanySettings() {
     event.preventDefault();
     setMessage("");
     setError("");
+    setSavingSettings(true);
     const { error: updateError } = await supabase
       .from("companies")
       .update({
@@ -54,6 +58,7 @@ export default function CompanySettings() {
         google_drive_folder_url: form.google_drive_folder_url || null,
       })
       .eq("id", company.id);
+    setSavingSettings(false);
     if (updateError) {
       setError(updateError.message);
       return;
@@ -66,9 +71,11 @@ export default function CompanySettings() {
     event.preventDefault();
     setError("");
     setMessage("");
+    setUploadingVerification(true);
 
     if (!verificationFile) {
       setError("Choose a verification file before uploading.");
+      setUploadingVerification(false);
       return;
     }
 
@@ -79,6 +86,7 @@ export default function CompanySettings() {
       .upload(path, verificationFile, { cacheControl: "3600", upsert: true });
     if (uploadError) {
       setError(uploadError.message);
+      setUploadingVerification(false);
       return;
     }
 
@@ -91,6 +99,7 @@ export default function CompanySettings() {
     });
     if (insertError) {
       setError(insertError.message);
+      setUploadingVerification(false);
       return;
     }
 
@@ -100,10 +109,12 @@ export default function CompanySettings() {
       .eq("id", company.id);
     if (companyError) {
       setError(companyError.message);
+      setUploadingVerification(false);
       return;
     }
 
     setVerificationFile(null);
+    setUploadingVerification(false);
     setMessage("Verification document uploaded. Company moved to under review.");
     refreshProfile();
   };
@@ -112,6 +123,7 @@ export default function CompanySettings() {
     event.preventDefault();
     setError("");
     setMessage("");
+    setSavingSync(true);
     const { error: upsertError } = await supabase.from("google_workspace_integrations").upsert({
       company_id: company.id,
       workspace_domain: googleIntegration.workspace_domain || null,
@@ -121,6 +133,7 @@ export default function CompanySettings() {
       service_account_email: googleIntegration.service_account_email || null,
       sync_status: googleIntegration.drive_sync_enabled ? "pending" : "not_connected",
     });
+    setSavingSync(false);
     if (upsertError) {
       setError(upsertError.message);
       return;
@@ -216,8 +229,8 @@ export default function CompanySettings() {
               }
             />
           </label>
-          <button className="primary-button" type="submit">
-            Save Settings
+          <button className="primary-button" type="submit" disabled={savingSettings}>
+            {savingSettings ? "Saving..." : "Save Settings"}
           </button>
         </form>
       </div>
@@ -245,8 +258,8 @@ export default function CompanySettings() {
               onChange={(event) => setVerificationFile(event.target.files?.[0] ?? null)}
             />
           </label>
-          <button className="ghost-button" type="submit">
-            Upload Verification Proof
+          <button className="ghost-button" type="submit" disabled={uploadingVerification}>
+            {uploadingVerification ? "Uploading..." : "Upload Verification Proof"}
           </button>
         </form>
       </div>
@@ -309,8 +322,8 @@ export default function CompanySettings() {
             <strong>Current Sync Status</strong>
             <p>{googleIntegration.sync_status ?? "not_connected"}</p>
           </div>
-          <button className="ghost-button" type="submit">
-            Save Google Sync Settings
+          <button className="ghost-button" type="submit" disabled={savingSync}>
+            {savingSync ? "Saving..." : "Save Google Sync Settings"}
           </button>
         </form>
       </div>

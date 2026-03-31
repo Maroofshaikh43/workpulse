@@ -1,173 +1,114 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { getToday } from "./utils";
+import { Icon } from "./brand";
+import { formatLiveDateTime } from "./utils";
 
 const navItems = {
   employee: [
-    { to: "attendance", label: "Attendance" },
-    { to: "leave", label: "Leave" },
-    { to: "mail", label: "Mail" },
-    { to: "daily-report", label: "Daily Report" },
-    { to: "salary-slips", label: "Salary Slips" },
-    { to: "assets", label: "My Assets" },
-    { to: "notifications", label: "Notifications" },
-    { to: "profile", label: "Profile" },
+    { to: "attendance", label: "Attendance", icon: "attendance" },
+    { to: "leave", label: "Leave", icon: "leave" },
+    { to: "mail", label: "Mail", icon: "mail" },
+    { to: "daily-report", label: "Daily Report", icon: "report" },
+    { to: "salary-slips", label: "Salary Slips", icon: "salary" },
+    { to: "assets", label: "My Assets", icon: "assets" },
+    { to: "profile", label: "Profile", icon: "profile" },
   ],
   hr: [
-    { to: "overview", label: "Overview" },
-    { to: "employees", label: "Employees" },
-    { to: "leave-approvals", label: "Leave Approvals", badgeKey: "pendingLeaves" },
-    { to: "broadcast", label: "Broadcast Mail" },
-    { to: "reports", label: "Reports" },
-    { to: "salary-slips", label: "Salary Slips" },
-    { to: "assets", label: "Assets" },
-    { to: "notifications", label: "Notifications" },
+    { to: "overview", label: "Overview", icon: "overview" },
+    { to: "employees", label: "Employees", icon: "employees" },
+    { to: "leave-approvals", label: "Leave Approvals", icon: "leave" },
+    { to: "broadcast", label: "Broadcast Mail", icon: "broadcast" },
+    { to: "reports", label: "Reports", icon: "report" },
+    { to: "salary-slips", label: "Salary Slips", icon: "salary" },
+    { to: "assets", label: "Assets", icon: "assets" },
   ],
   admin: [
-    { to: "overview", label: "Overview" },
-    { to: "employees", label: "Employees" },
-    { to: "leave-approvals", label: "Leave Approvals", badgeKey: "pendingLeaves" },
-    { to: "broadcast", label: "Broadcast Mail" },
-    { to: "reports", label: "Reports" },
-    { to: "salary-slips", label: "Salary Slips" },
-    { to: "role-management", label: "Role Management" },
-    { to: "analytics", label: "Analytics" },
-    { to: "company-settings", label: "Company Settings" },
-    { to: "assets", label: "Assets" },
-    { to: "notifications", label: "Notifications" },
+    { to: "overview", label: "Overview", icon: "overview" },
+    { to: "employees", label: "Employees", icon: "employees" },
+    { to: "leave-approvals", label: "Leave Approvals", icon: "leave" },
+    { to: "broadcast", label: "Broadcast Mail", icon: "broadcast" },
+    { to: "reports", label: "Reports", icon: "report" },
+    { to: "salary-slips", label: "Salary Slips", icon: "salary" },
+    { to: "role-management", label: "Role Management", icon: "roles" },
+    { to: "analytics", label: "Analytics", icon: "analytics" },
+    { to: "company-settings", label: "Company Settings", icon: "settings" },
+    { to: "assets", label: "Assets", icon: "assets" },
   ],
-  super_admin: [
-    { to: "super-admin", label: "Platform Control" },
-    { to: "notifications", label: "Notifications" },
-  ],
+  super_admin: [{ to: "super-admin", label: "Platform Control", icon: "platform" }],
 };
 
 export default function Dashboard({ supabase, profile, company, refreshProfile }) {
   const navigate = useNavigate();
   const location = useLocation();
-  const [pendingLeaves, setPendingLeaves] = useState(0);
+  const menuRef = useRef(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [now, setNow] = useState(() => new Date());
 
   const items = useMemo(() => navItems[profile.role] ?? navItems.employee, [profile.role]);
   const activeItem = useMemo(
     () => items.find((item) => location.pathname === `/app/${item.to}`) ?? items[0],
     [items, location.pathname],
   );
-  const workspaceStats = useMemo(() => {
-    const stats = [
-      {
-        label: "Workspace",
-        value: profile.role === "super_admin" ? "Platform Control" : company?.name ?? "Company Workspace",
-      },
-      {
-        label: "Role Access",
-        value: profile.role.replaceAll("_", " ").toUpperCase(),
-      },
-    ];
-
-    if (profile.role === "super_admin") {
-      stats.push(
-        { label: "Focus", value: "Verification + Operations" },
-        { label: "Today", value: getToday() },
-      );
-      return stats;
-    }
-
-    stats.push(
-      { label: "Verification", value: company?.verification_status?.replaceAll("_", " ") ?? "pending" },
-      {
-        label: "Attendance Radius",
-        value: company?.attendance_radius_meters ? `${company.attendance_radius_meters}m perimeter` : "Not set",
-      },
-    );
-
-    if (["hr", "admin"].includes(profile.role)) {
-      stats.push({ label: "Pending Leaves", value: `${pendingLeaves}` });
-    }
-
-    if (profile.role === "employee") {
-      stats.push({ label: "Report Rule", value: "Submit before logout" });
-    }
-
-    return stats;
-  }, [company, pendingLeaves, profile.role]);
 
   useEffect(() => {
     const allowedPaths = items.map((item) => `/app/${item.to}`);
     if (!allowedPaths.includes(location.pathname) && location.pathname !== "/app") {
       navigate(`/app/${items[0].to}`, { replace: true });
     }
+    setSidebarOpen(false);
   }, [items, location.pathname, navigate]);
 
   useEffect(() => {
-    if (!["hr", "admin"].includes(profile.role)) return undefined;
-
-    const loadPendingLeaves = async () => {
-      const { count } = await supabase
-        .from("leaves")
-        .select("id", { count: "exact", head: true })
-        .eq("company_id", profile.company_id)
-        .eq("status", "pending");
-      setPendingLeaves(count ?? 0);
+    const handleClickOutside = (event) => {
+      if (menuRef.current && !menuRef.current.contains(event.target)) {
+        setMenuOpen(false);
+      }
     };
 
-    loadPendingLeaves();
-    return undefined;
-  }, [profile.company_id, profile.role, supabase, location.pathname]);
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNow(new Date());
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, []);
 
   const handleLogout = async () => {
-    if (profile.role === "employee") {
-      const today = getToday();
-      const { data: attendanceRow } = await supabase
-        .from("attendance")
-        .select("check_in_time,check_out_time")
-        .eq("user_id", profile.id)
-        .eq("date", today)
-        .maybeSingle();
-
-      if (attendanceRow?.check_in_time && !attendanceRow?.check_out_time) {
-        const { data: reportRow } = await supabase
-          .from("daily_report_submissions")
-          .select("id")
-          .eq("user_id", profile.id)
-          .eq("date", today)
-          .maybeSingle();
-
-        if (!reportRow) {
-          window.alert("Complete today's daily report before logging out.");
-          return;
-        }
-      }
-    }
-
     await supabase.auth.signOut();
     navigate("/auth", { replace: true });
   };
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${sidebarOpen ? " sidebar-open" : ""}`}>
+      <button
+        type="button"
+        className={`sidebar-overlay${sidebarOpen ? " visible" : ""}`}
+        aria-label="Close navigation"
+        onClick={() => setSidebarOpen(false)}
+      />
+
       <aside className="sidebar">
-        <div>
-          <div className="sidebar-brand">
-            <div className="brand-mark">WP</div>
-            <div>
-              <h1>WorkPulse</h1>
-              <p>{profile.role === "super_admin" ? "Platform Operations" : company?.name ?? "Company Workspace"}</p>
-            </div>
+        <div className="sidebar-main">
+          <div className="sidebar-toprow">
+            <button type="button" className="sidebar-brand" onClick={() => navigate("/app")}>
+              <span className="brand-monogram">WP</span>
+              <span className="brand-wordmark">WorkPulse</span>
+            </button>
+            <button
+              type="button"
+              className="icon-button sidebar-close"
+              aria-label="Close navigation"
+              onClick={() => setSidebarOpen(false)}
+            >
+              <Icon name="close" />
+            </button>
           </div>
-          <div className="sidebar-user">
-            <div>
-              <strong>{profile.name}</strong>
-              <span>{profile.role.replaceAll("_", " ").toUpperCase()}</span>
-            </div>
-            {profile.role !== "super_admin" ? (
-              <span className={`status-pill ${company?.verification_status ?? "pending"}`}>
-                {company?.verification_status?.replaceAll("_", " ") ?? "pending"}
-              </span>
-            ) : (
-              <span className="status-pill verified">verified</span>
-            )}
-          </div>
-          <div className="sidebar-section-label">Workspace Navigation</div>
+
           <nav className="sidebar-nav">
             {items.map((item) => (
               <NavLink
@@ -175,51 +116,110 @@ export default function Dashboard({ supabase, profile, company, refreshProfile }
                 to={item.to}
                 className={({ isActive }) => (isActive ? "nav-item active" : "nav-item")}
               >
-                <span>{item.label}</span>
-                {item.badgeKey === "pendingLeaves" && pendingLeaves > 0 ? (
-                  <span className="nav-badge">{pendingLeaves}</span>
-                ) : null}
+                <span className="nav-item-copy">
+                  <Icon name={item.icon} />
+                  <span>{item.label}</span>
+                </span>
               </NavLink>
             ))}
           </nav>
         </div>
 
-        <div className="sidebar-footer">
-          <button type="button" className="ghost-button full-width" onClick={refreshProfile}>
-            Refresh
-          </button>
-          <button type="button" className="primary-button full-width" onClick={handleLogout}>
-            Logout
-          </button>
+        <div className="sidebar-user">
+          <div className="account-avatar sidebar-avatar">{profile.name?.slice(0, 1)?.toUpperCase() ?? "U"}</div>
+          <div>
+            <strong>{profile.name}</strong>
+            <span>{profile.role.replaceAll("_", " ")}</span>
+          </div>
         </div>
       </aside>
 
       <main className="content-area">
         <header className="topbar">
           <div className="topbar-heading">
-            <div className="eyebrow-label">{profile.role === "super_admin" ? "Platform workspace" : "Operations workspace"}</div>
-            <h2>{activeItem?.label ?? company?.name ?? "WorkPulse"}</h2>
-            <p>
-              {profile.role === "super_admin"
-                ? "Monitor company onboarding, verification, and platform-level operations."
-                : "A focused command center for attendance, people workflows, and day-to-day company execution."}
-            </p>
+            <div className="topbar-title-row">
+              <button
+                type="button"
+                className="icon-button sidebar-toggle"
+                aria-label="Open navigation"
+                onClick={() => setSidebarOpen(true)}
+              >
+                <Icon name="menu" />
+              </button>
+              <h1>{activeItem?.label ?? company?.name ?? "WorkPulse"}</h1>
+            </div>
           </div>
-          <div className="topbar-meta">
-            <span>{getToday()}</span>
-            <span>{profile.department}</span>
-            <span>{profile.email}</span>
+
+          <div className="topbar-actions">
+            <span className="topbar-date">{formatLiveDateTime(now)}</span>
+            <div className="account-menu" ref={menuRef}>
+              <button
+                type="button"
+                className="account-trigger compact"
+                onClick={() => setMenuOpen((current) => !current)}
+                aria-expanded={menuOpen}
+              >
+                <div className="account-avatar">{profile.name?.slice(0, 1)?.toUpperCase() ?? "U"}</div>
+                <div className="account-summary">
+                  <strong>{profile.name}</strong>
+                </div>
+              </button>
+
+              {menuOpen ? (
+                <div className="account-dropdown">
+                  <div className="account-dropdown-header">
+                    <strong>{profile.name}</strong>
+                    <span>{profile.email}</span>
+                  </div>
+                  <div className="account-dropdown-actions">
+                    {items.some((item) => item.to === "profile") ? (
+                      <button
+                        type="button"
+                        className="ghost-button full-width"
+                        onClick={() => {
+                          setMenuOpen(false);
+                          navigate("/app/profile");
+                        }}
+                      >
+                        Open Profile
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="ghost-button full-width"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        navigate("/app/notifications");
+                      }}
+                    >
+                      Notifications
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost-button full-width"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        refreshProfile();
+                      }}
+                    >
+                      Refresh
+                    </button>
+                    <button
+                      type="button"
+                      className="primary-button full-width"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        handleLogout();
+                      }}
+                    >
+                      Logout
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
           </div>
         </header>
-
-        <section className="workspace-strip">
-          {workspaceStats.map((stat) => (
-            <div key={stat.label} className="workspace-stat">
-              <span>{stat.label}</span>
-              <strong>{stat.value}</strong>
-            </div>
-          ))}
-        </section>
 
         <Outlet
           context={{
@@ -227,8 +227,8 @@ export default function Dashboard({ supabase, profile, company, refreshProfile }
             profile,
             company,
             refreshProfile,
-            pendingLeaves,
-            setPendingLeaves,
+            pendingLeaves: 0,
+            setPendingLeaves: () => {},
           }}
         />
       </main>

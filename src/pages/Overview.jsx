@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useOutletContext } from "react-router-dom";
-import { average, getDateOffset, getDatesBetween, getToday, hoursBetween, formatTime } from "../utils";
+import { average, formatLongDate, getDateOffset, getDatesBetween, getToday, hoursBetween, formatTime } from "../utils";
 
 export default function Overview() {
   const { supabase, profile } = useOutletContext();
@@ -162,7 +162,7 @@ export default function Overview() {
       <div className="panel">
         <div className="section-header">
           <h2>Smart Alerts</h2>
-          <p>Automatic attention points based on inactivity, output drop, report compliance, and standout performance.</p>
+          <p>{formatLongDate()}.</p>
         </div>
         <div className="smart-alert-grid">
           {smartAlerts.map((alert, index) => (
@@ -177,7 +177,7 @@ export default function Overview() {
       <div className="panel">
         <div className="section-header">
           <h2>Today's Live Attendance</h2>
-          <p>See who is currently in, out, or absent across the company.</p>
+          <p>{formatLongDate()}.</p>
         </div>
         <div className="table-wrap">
           <table>

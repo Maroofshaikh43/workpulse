@@ -22,6 +22,7 @@ export default function SalarySlips() {
   const [form, setForm] = useState(defaultForm);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   const isManager = ["hr", "admin"].includes(profile.role);
 
@@ -70,6 +71,7 @@ export default function SalarySlips() {
     event.preventDefault();
     setError("");
     setMessage("");
+    setSubmitting(true);
     try {
       let slipFileUrl = null;
       if (form.slipFile) {
@@ -100,6 +102,8 @@ export default function SalarySlips() {
       loadData();
     } catch (uploadError) {
       setError(uploadError.message);
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -224,8 +228,8 @@ export default function SalarySlips() {
                 />
               </label>
             </div>
-            <button className="primary-button" type="submit">
-              Save Salary Slip
+            <button className="primary-button" type="submit" disabled={submitting}>
+              {submitting ? "Saving..." : "Save Salary Slip"}
             </button>
           </form>
         </div>

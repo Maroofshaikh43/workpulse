@@ -19,6 +19,7 @@ export default function Assets() {
   const [form, setForm] = useState(defaultForm);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   const isManager = ["hr", "admin", "super_admin"].includes(profile.role);
 
@@ -65,6 +66,7 @@ export default function Assets() {
     event.preventDefault();
     setError("");
     setMessage("");
+    setSubmitting(true);
     const payload = {
       company_id: profile.company_id,
       asset_tag: form.asset_tag,
@@ -77,6 +79,7 @@ export default function Assets() {
       notes: form.notes || null,
     };
     const { error: insertError } = await supabase.from("assets").insert(payload);
+    setSubmitting(false);
     if (insertError) {
       setError(insertError.message);
       return;
@@ -147,8 +150,8 @@ export default function Assets() {
               Notes
               <textarea rows="4" value={form.notes} onChange={(event) => setForm((current) => ({ ...current, notes: event.target.value }))} />
             </label>
-            <button className="primary-button" type="submit">
-              Save Asset
+            <button className="primary-button" type="submit" disabled={submitting}>
+              {submitting ? "Saving..." : "Save Asset"}
             </button>
           </form>
         </div>

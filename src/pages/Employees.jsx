@@ -18,6 +18,9 @@ export default function Employees() {
   const [form, setForm] = useState(defaultForm);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [statusActionId, setStatusActionId] = useState("");
+  const [savingDriveId, setSavingDriveId] = useState("");
 
   const loadEmployees = async () => {
     const [employeeResponse, attendanceResponse] = await Promise.all([
@@ -48,10 +51,12 @@ export default function Employees() {
   }, []);
 
   const handleStatusToggle = async (employee) => {
+    setStatusActionId(employee.id);
     const { error: updateError } = await supabase
       .from("users")
       .update({ is_active: !employee.is_active })
       .eq("id", employee.id);
+    setStatusActionId("");
     if (updateError) {
       setError(updateError.message);
       return;
@@ -64,6 +69,7 @@ export default function Employees() {
     event.preventDefault();
     setError("");
     setMessage("");
+    setSubmitting(true);
 
     try {
       const currentSession = (await supabase.auth.getSession()).data.session;
@@ -101,14 +107,18 @@ export default function Employees() {
       loadEmployees();
     } catch (creationError) {
       setError(creationError.message);
+    } finally {
+      setSubmitting(false);
     }
   };
 
   const saveDriveLink = async (employeeId) => {
+    setSavingDriveId(employeeId);
     const { error: updateError } = await supabase
       .from("users")
       .update({ daily_report_drive_url: driveLinks[employeeId] || null })
       .eq("id", employeeId);
+    setSavingDriveId("");
     if (updateError) {
       setError(updateError.message);
       return;
@@ -188,8 +198,8 @@ export default function Employees() {
               />
             </label>
           </div>
-          <button className="primary-button" type="submit">
-            Add Employee
+          <button className="primary-button" type="submit" disabled={submitting}>
+            {submitting ? "Creating..." : "Add Employee"}
           </button>
         </form>
       </div>
@@ -235,14 +245,14 @@ export default function Employees() {
                           setDriveLinks((current) => ({ ...current, [employee.id]: event.target.value }))
                         }
                       />
-                      <button type="button" className="ghost-button" onClick={() => saveDriveLink(employee.id)}>
-                        Save
+                      <button type="button" className="ghost-button" onClick={() => saveDriveLink(employee.id)} disabled={savingDriveId === employee.id}>
+                        {savingDriveId === employee.id ? "Saving..." : "Save"}
                       </button>
                     </div>
                   </td>
                   <td>
-                    <button type="button" className="link-button" onClick={() => handleStatusToggle(employee)}>
-                      {employee.is_active ? "Remove" : "Restore"}
+                    <button type="button" className="link-button" onClick={() => handleStatusToggle(employee)} disabled={statusActionId === employee.id}>
+                      {statusActionId === employee.id ? "Updating..." : employee.is_active ? "Remove" : "Restore"}
                     </button>
                   </td>
                 </tr>

@@ -73,7 +73,7 @@ export default function Leave() {
 
   return (
     <section className="page-stack">
-      <div className="stat-grid">
+      <div className="grid-three">
         <div className="stat-card">
           <span>Available</span>
           <strong>{balance.available}</strong>

@@ -13,6 +13,8 @@ export default function Notifications() {
   });
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [readingId, setReadingId] = useState("");
 
   const loadData = async () => {
     const [notificationResponse, preferenceResponse] = await Promise.all([
@@ -47,6 +49,7 @@ export default function Notifications() {
     event.preventDefault();
     setError("");
     setMessage("");
+    setSaving(true);
     const { error: upsertError } = await supabase.from("notification_preferences").upsert({
       user_id: profile.id,
       email_enabled: preferences.email_enabled,
@@ -54,6 +57,7 @@ export default function Notifications() {
       attendance_alerts: preferences.attendance_alerts,
       hr_alerts: preferences.hr_alerts,
     });
+    setSaving(false);
     if (upsertError) {
       setError(upsertError.message);
       return;
@@ -62,10 +66,12 @@ export default function Notifications() {
   };
 
   const markRead = async (id) => {
+    setReadingId(id);
     const { error: updateError } = await supabase
       .from("notifications")
       .update({ read_at: new Date().toISOString() })
       .eq("id", id);
+    setReadingId("");
     if (updateError) {
       setError(updateError.message);
       return;
@@ -91,8 +97,8 @@ export default function Notifications() {
               <div className="row-end">
                 <span className={`status-pill ${item.channel === "email" ? "under_review" : "verified"}`}>{item.channel}</span>
                 {!item.read_at && (
-                  <button type="button" className="ghost-button" onClick={() => markRead(item.id)}>
-                    Mark Read
+                  <button type="button" className="ghost-button" onClick={() => markRead(item.id)} disabled={readingId === item.id}>
+                    {readingId === item.id ? "Saving..." : "Mark Read"}
                   </button>
                 )}
               </div>
@@ -142,8 +148,8 @@ export default function Notifications() {
             />
             HR and approval alerts
           </label>
-          <button className="primary-button" type="submit">
-            Save Preferences
+          <button className="primary-button" type="submit" disabled={saving}>
+            {saving ? "Saving..." : "Save Preferences"}
           </button>
         </form>
       </div>

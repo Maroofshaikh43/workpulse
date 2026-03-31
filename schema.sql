@@ -10,6 +10,7 @@ create table if not exists public.companies (
   office_lng double precision,
   attendance_radius_meters integer not null default 200,
   google_drive_folder_url text,
+  status text not null default 'pending' check (status in ('pending', 'approved', 'suspended', 'rejected')),
   verification_status text not null default 'pending' check (verification_status in ('pending', 'under_review', 'verified', 'rejected')),
   verification_notes text,
   verified_at timestamptz,
@@ -34,11 +35,16 @@ create table if not exists public.users (
 
 alter table public.companies add column if not exists attendance_radius_meters integer not null default 200;
 alter table public.companies add column if not exists google_drive_folder_url text;
+alter table public.companies add column if not exists status text not null default 'pending';
 alter table public.companies add column if not exists verification_status text not null default 'pending';
 alter table public.companies add column if not exists verification_notes text;
 alter table public.companies add column if not exists verified_at timestamptz;
 alter table public.companies add column if not exists verified_by uuid;
 alter table public.users add column if not exists daily_report_drive_url text;
+
+update public.companies
+set status = 'approved'
+where status is null;
 
 create table if not exists public.assets (
   id uuid primary key default gen_random_uuid(),

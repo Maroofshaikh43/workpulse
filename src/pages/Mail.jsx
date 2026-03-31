@@ -15,6 +15,7 @@ export default function Mail() {
   const [compose, setCompose] = useState(defaultCompose);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [sending, setSending] = useState(false);
 
   const loadInbox = async () => {
     const [broadcastResponse, usersResponse] = await Promise.all([
@@ -53,6 +54,7 @@ export default function Mail() {
     event.preventDefault();
     setError("");
     setMessage("");
+    setSending(true);
     const { error: insertError } = await supabase.from("broadcasts").insert({
       sender_id: profile.id,
       company_id: profile.company_id,
@@ -60,6 +62,7 @@ export default function Mail() {
       subject: compose.subject,
       body: compose.body,
     });
+    setSending(false);
     if (insertError) {
       setError(insertError.message);
       return;
@@ -127,8 +130,8 @@ export default function Mail() {
               required
             />
           </label>
-          <button className="primary-button" type="submit">
-            Send Mail
+          <button className="primary-button" type="submit" disabled={sending}>
+            {sending ? "Sending..." : "Send Mail"}
           </button>
         </form>
       </div>

@@ -145,18 +145,22 @@ export default function Analytics() {
             <h2>Weekly Attendance</h2>
             <p>Present, absent, and late counts for the last seven days.</p>
           </div>
-          <ResponsiveContainer width="100%" height={320}>
-            <BarChart data={weeklyAttendanceData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="name" stroke="#94a3b8" />
-              <YAxis stroke="#94a3b8" />
-              <Tooltip />
-              <Legend />
-              <Bar dataKey="present" fill="#22c55e" radius={[6, 6, 0, 0]} />
-              <Bar dataKey="absent" fill="#ef4444" radius={[6, 6, 0, 0]} />
-              <Bar dataKey="late" fill="#f59e0b" radius={[6, 6, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
+          {attendance.length ? (
+            <ResponsiveContainer width="100%" height={320}>
+              <BarChart data={weeklyAttendanceData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                <XAxis dataKey="name" stroke="#94a3b8" />
+                <YAxis stroke="#94a3b8" />
+                <Tooltip />
+                <Legend />
+                <Bar dataKey="present" fill="#22c55e" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="absent" fill="#ef4444" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="late" fill="#f59e0b" radius={[6, 6, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="empty-state">No attendance data yet for this workspace.</div>
+          )}
         </div>
 
         <div className="panel chart-panel">
@@ -164,16 +168,20 @@ export default function Analytics() {
             <h2>Department Distribution</h2>
             <p>Current active headcount split by department.</p>
           </div>
-          <ResponsiveContainer width="100%" height={320}>
-            <PieChart>
-              <Pie data={departmentDistribution} dataKey="value" nameKey="name" outerRadius={110} label>
-                {departmentDistribution.map((entry, index) => (
-                  <Cell key={entry.name} fill={chartColors[index % chartColors.length]} />
-                ))}
-              </Pie>
-              <Tooltip />
-            </PieChart>
-          </ResponsiveContainer>
+          {departmentDistribution.length ? (
+            <ResponsiveContainer width="100%" height={320}>
+              <PieChart>
+                <Pie data={departmentDistribution} dataKey="value" nameKey="name" outerRadius={110} label>
+                  {departmentDistribution.map((entry, index) => (
+                    <Cell key={entry.name} fill={chartColors[index % chartColors.length]} />
+                  ))}
+                </Pie>
+                <Tooltip />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="empty-state">No department data available yet.</div>
+          )}
         </div>
       </div>
 
@@ -182,15 +190,19 @@ export default function Analytics() {
             <h2>Average Hours This Week</h2>
             <p>Average hours inferred from attendance check-in and check-out times.</p>
           </div>
-        <ResponsiveContainer width="100%" height={320}>
-          <LineChart data={averageHoursData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-            <XAxis dataKey="name" stroke="#94a3b8" />
-            <YAxis stroke="#94a3b8" />
-            <Tooltip />
-            <Line type="monotone" dataKey="hours" stroke="#8b5cf6" strokeWidth={3} dot={{ r: 4 }} />
-          </LineChart>
-        </ResponsiveContainer>
+        {attendance.length ? (
+          <ResponsiveContainer width="100%" height={320}>
+            <LineChart data={averageHoursData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+              <XAxis dataKey="name" stroke="#94a3b8" />
+              <YAxis stroke="#94a3b8" />
+              <Tooltip />
+              <Line type="monotone" dataKey="hours" stroke="#8b5cf6" strokeWidth={3} dot={{ r: 4 }} />
+            </LineChart>
+          </ResponsiveContainer>
+        ) : (
+          <div className="empty-state">Average hours will appear after attendance is recorded.</div>
+        )}
       </div>
     </section>
   );
