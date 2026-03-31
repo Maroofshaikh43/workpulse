@@ -42,6 +42,7 @@ export default function SuperAdmin() {
   const [documentsCompanyId, setDocumentsCompanyId] = useState("");
   const [detailCompanyId, setDetailCompanyId] = useState("");
   const [loading, setLoading] = useState(true);
+  const [supportingDataLoading, setSupportingDataLoading] = useState(true);
 
   const buildCompanyRows = (rawCompanies, allUsers = users) => {
     const employeeCounts = allUsers.reduce((accumulator, user) => {
@@ -62,33 +63,35 @@ export default function SuperAdmin() {
     }));
   };
 
-  const fetchCompanies = async () => {
+  const loadCompanies = async () => {
+    setLoading(true);
     const { data, error: fetchError } = await supabase
       .from("companies")
       .select("*");
 
-    console.log("Fetched companies:", data);
-    console.log("Fetch error:", fetchError);
+    console.log("Companies loaded:", data);
 
-    if (fetchError) {
-      setError(fetchError.message);
-      return [];
+    if (data) {
+      const nextCompanies = buildCompanyRows(data, users);
+      setCompanies(nextCompanies);
+      setNotes(
+        nextCompanies.reduce((accumulator, company) => {
+          accumulator[company.id] = company.verification_notes ?? "";
+          return accumulator;
+        }, {}),
+      );
     }
 
-    const nextCompanies = buildCompanyRows(data ?? []);
+    if (fetchError) {
+      console.error("Load error:", fetchError);
+      setError(fetchError.message);
+    }
 
-    setCompanies(nextCompanies);
-    setNotes(
-      nextCompanies.reduce((accumulator, company) => {
-        accumulator[company.id] = company.verification_notes ?? "";
-        return accumulator;
-      }, {}),
-    );
-    return nextCompanies;
+    setLoading(false);
   };
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchSupportingData = async () => {
+    setSupportingDataLoading(true);
     const monthStart = getFirstDayOfCurrentMonth();
     const today = getToday();
     const [documentsResponse, usersResponse, attendanceResponse] = await Promise.all([
@@ -106,17 +109,17 @@ export default function SuperAdmin() {
 
     if (documentsResponse.error) {
       setError(documentsResponse.error.message);
-      setLoading(false);
+      setSupportingDataLoading(false);
       return;
     }
     if (usersResponse.error) {
       setError(usersResponse.error.message);
-      setLoading(false);
+      setSupportingDataLoading(false);
       return;
     }
     if (attendanceResponse.error) {
       setError(attendanceResponse.error.message);
-      setLoading(false);
+      setSupportingDataLoading(false);
       return;
     }
 
@@ -124,19 +127,16 @@ export default function SuperAdmin() {
     setDocuments(documentsResponse.data ?? []);
     setUsers(allUsers);
     setAttendance(attendanceResponse.data ?? []);
-    const { data: companiesData, error: companiesError } = await supabase.from("companies").select("*");
-    if (companiesError) {
-      setError(companiesError.message);
-      setLoading(false);
-      return;
-    }
-    setCompanies(buildCompanyRows(companiesData ?? [], allUsers));
-    setLoading(false);
+    setCompanies((current) => buildCompanyRows(current, allUsers));
+    setSupportingDataLoading(false);
   };
 
   useEffect(() => {
-    fetchCompanies();
-    fetchData();
+    loadCompanies();
+  }, []);
+
+  useEffect(() => {
+    fetchSupportingData();
   }, [supabase]);
 
   const usersByCompany = useMemo(
@@ -226,40 +226,36 @@ export default function SuperAdmin() {
     };
   }, [attendanceByCompany, selectedCompany]);
 
-  const updateCompanyStatus = async (companyId, newStatus) => {
-    try {
-      setError("");
-      setMessage("");
-      setActionId(`${companyId}-${newStatus}`);
-      console.log("Starting update for:", companyId, newStatus);
+  const setStatus = async (id, newStatus) => {
+    console.log("Setting", id, "to", newStatus);
+    setActionId(`${id}-${newStatus}`);
 
-      const { data, error: updateError } = await supabase
-        .from("companies")
-        .update({ status: newStatus })
-        .eq("id", companyId)
-        .select("id, name, status");
+    const { data, error: updateError } = await supabase
+      .from("companies")
+      .update({ status: newStatus })
+      .eq("id", id)
+      .select();
 
-      console.log("Supabase response data:", data);
-      console.log("Supabase response error:", updateError);
+    console.log("Result:", data, updateError);
 
-      if (updateError) {
-        alert(`Database error: ${updateError.message}`);
-        return;
-      }
-
-      if (!data || data.length === 0) {
-        alert("No rows were updated. RLS may be blocking.");
-        return;
-      }
-
-      alert(`Updated successfully to: ${newStatus}`);
-      await fetchCompanies();
-    } catch (err) {
-      console.error("Caught error:", err);
-      alert(`Error: ${err.message}`);
-    } finally {
+    if (updateError) {
+      alert(`Failed: ${updateError.message}`);
       setActionId("");
+      return;
     }
+
+    if (!data?.length) {
+      alert("Nothing updated - RLS blocking");
+      setActionId("");
+      return;
+    }
+
+    setCompanies((prev) =>
+      buildCompanyRows(
+        prev.map((company) => (company.id === id ? { ...company, status: newStatus } : company)),
+      ),
+    );
+    setActionId("");
   };
 
   const renderActionButtons = (company) => (
@@ -267,7 +263,7 @@ export default function SuperAdmin() {
         <button
           type="button"
           className="primary-button"
-          onClick={() => updateCompanyStatus(company.id, "approved")}
+          onClick={() => setStatus(company.id, "approved")}
           disabled={company.status === "approved" || actionId === `${company.id}-approved`}
         >
           {actionId === `${company.id}-approved` ? "Saving..." : company.status === "suspended" ? "Reactivate" : "Approve"}
@@ -275,7 +271,7 @@ export default function SuperAdmin() {
         <button
           type="button"
           className="ghost-button"
-          onClick={() => updateCompanyStatus(company.id, "suspended")}
+          onClick={() => setStatus(company.id, "suspended")}
           disabled={company.status !== "approved" || actionId === `${company.id}-suspended`}
         >
           {actionId === `${company.id}-suspended` ? "Suspending..." : "Suspend"}
@@ -283,7 +279,7 @@ export default function SuperAdmin() {
         <button
           type="button"
           className="link-button danger"
-          onClick={() => updateCompanyStatus(company.id, "rejected")}
+          onClick={() => setStatus(company.id, "rejected")}
           disabled={company.status === "rejected" || actionId === `${company.id}-rejected`}
         >
           {actionId === `${company.id}-rejected` ? "Rejecting..." : "Reject"}
@@ -296,9 +292,9 @@ export default function SuperAdmin() {
       {!!error && <div className="alert error">{error}</div>}
       {!!message && <div className="alert success">{message}</div>}
 
-      {loading ? <div className="panel empty-state">Loading companies...</div> : null}
+      {loading || supportingDataLoading ? <div className="panel empty-state">Loading companies...</div> : null}
 
-      {!loading ? <div className="stat-grid">
+      {!loading && !supportingDataLoading ? <div className="stat-grid">
         <div className="stat-card">
           <span>Total companies</span>
           <strong>{metrics.totalCompanies}</strong>
@@ -325,7 +321,7 @@ export default function SuperAdmin() {
         </div>
       </div> : null}
 
-      {!loading ? <div className="panel">
+      {!loading && !supportingDataLoading ? <div className="panel">
         <div className="section-header">
           <h2>Company Management</h2>
           <p>Approve, suspend, reactivate, and review every company from one workspace.</p>
