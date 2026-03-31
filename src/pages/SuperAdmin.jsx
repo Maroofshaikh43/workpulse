@@ -43,14 +43,7 @@ export default function SuperAdmin() {
   const [detailCompanyId, setDetailCompanyId] = useState("");
   const [loading, setLoading] = useState(true);
 
-  const fetchCompanies = async (allUsers = users) => {
-    const companiesResponse = await supabase.from("companies").select("*").order("created_at", { ascending: false });
-
-    if (companiesResponse.error) {
-      setError(companiesResponse.error.message);
-      return [];
-    }
-
+  const buildCompanyRows = (rawCompanies, allUsers = users) => {
     const employeeCounts = allUsers.reduce((accumulator, user) => {
       accumulator[user.company_id] = (accumulator[user.company_id] ?? 0) + 1;
       return accumulator;
@@ -61,12 +54,28 @@ export default function SuperAdmin() {
       return accumulator;
     }, {});
 
-    const nextCompanies = (companiesResponse.data ?? []).map((company) => ({
+    return (rawCompanies ?? []).map((company) => ({
       ...company,
       status: normalizeCompanyStatus(company.status, company.verification_status),
       employee_count: employeeCounts[company.id] ?? 0,
       owner: ownerMap[company.id] ?? allUsers.find((user) => user.company_id === company.id) ?? null,
     }));
+  };
+
+  const fetchCompanies = async () => {
+    const { data, error: fetchError } = await supabase
+      .from("companies")
+      .select("*");
+
+    console.log("Fetched companies:", data);
+    console.log("Fetch error:", fetchError);
+
+    if (fetchError) {
+      setError(fetchError.message);
+      return [];
+    }
+
+    const nextCompanies = buildCompanyRows(data ?? []);
 
     setCompanies(nextCompanies);
     setNotes(
@@ -115,11 +124,18 @@ export default function SuperAdmin() {
     setDocuments(documentsResponse.data ?? []);
     setUsers(allUsers);
     setAttendance(attendanceResponse.data ?? []);
-    await fetchCompanies(allUsers);
+    const { data: companiesData, error: companiesError } = await supabase.from("companies").select("*");
+    if (companiesError) {
+      setError(companiesError.message);
+      setLoading(false);
+      return;
+    }
+    setCompanies(buildCompanyRows(companiesData ?? [], allUsers));
     setLoading(false);
   };
 
   useEffect(() => {
+    fetchCompanies();
     fetchData();
   }, [supabase]);
 
@@ -210,40 +226,40 @@ export default function SuperAdmin() {
     };
   }, [attendanceByCompany, selectedCompany]);
 
-  const updateCompanyStatus = async (companyId, nextStatus) => {
-    setError("");
-    setMessage("");
-    setActionId(`${companyId}-${nextStatus}`);
+  const updateCompanyStatus = async (companyId, newStatus) => {
+    try {
+      setError("");
+      setMessage("");
+      setActionId(`${companyId}-${newStatus}`);
+      console.log("Starting update for:", companyId, newStatus);
 
-    const updates = {
-      status: nextStatus,
-      verification_notes: notes[companyId] || null,
-      verified_by: profile.id,
-    };
+      const { data, error: updateError } = await supabase
+        .from("companies")
+        .update({ status: newStatus })
+        .eq("id", companyId)
+        .select("id, name, status");
 
-    if (nextStatus === "approved") {
-      updates.verification_status = "verified";
-      updates.verified_at = new Date().toISOString();
-    } else if (nextStatus === "rejected") {
-      updates.verification_status = "rejected";
+      console.log("Supabase response data:", data);
+      console.log("Supabase response error:", updateError);
+
+      if (updateError) {
+        alert(`Database error: ${updateError.message}`);
+        return;
+      }
+
+      if (!data || data.length === 0) {
+        alert("No rows were updated. RLS may be blocking.");
+        return;
+      }
+
+      alert(`Updated successfully to: ${newStatus}`);
+      await fetchCompanies();
+    } catch (err) {
+      console.error("Caught error:", err);
+      alert(`Error: ${err.message}`);
+    } finally {
+      setActionId("");
     }
-
-    const { data, error: updateError } = await supabase
-      .from("companies")
-      .update({ status: nextStatus, ...updates })
-      .eq("id", companyId)
-      .select();
-
-    setActionId("");
-    if (updateError) {
-      console.error("Status update error:", updateError);
-      setError(updateError.message);
-      return;
-    }
-
-    console.log("Updated successfully:", data);
-    setMessage(`Company status updated to ${nextStatus}.`);
-    await fetchCompanies();
   };
 
   const renderActionButtons = (company) => (
