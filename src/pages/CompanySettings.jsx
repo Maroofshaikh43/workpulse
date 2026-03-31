@@ -17,6 +17,9 @@ export default function CompanySettings() {
   const { supabase, company, profile, refreshProfile } = useOutletContext();
   const [companyRecord, setCompanyRecord] = useState(company ?? null);
   const [form, setForm] = useState(createFormState(company));
+  const [officeLat, setOfficeLat] = useState(company?.office_lat ?? "");
+  const [officeLng, setOfficeLng] = useState(company?.office_lng ?? "");
+  const [officeRadius, setOfficeRadius] = useState(company?.attendance_radius_meters ?? 200);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [verificationFile, setVerificationFile] = useState(null);
@@ -37,15 +40,18 @@ export default function CompanySettings() {
   const applyCompanyRecord = (nextCompany) => {
     setCompanyRecord(nextCompany);
     setForm(createFormState(nextCompany));
+    setOfficeLat(nextCompany?.office_lat ?? "");
+    setOfficeLng(nextCompany?.office_lng ?? "");
+    setOfficeRadius(nextCompany?.attendance_radius_meters ?? 200);
   };
 
-  const fetchCompanyData = async () => {
+  const loadSettings = async () => {
     if (!profile?.company_id) return;
 
     setLoadingCompany(true);
     const { data, error: fetchError } = await supabase
       .from("companies")
-      .select("*")
+      .select("office_lat, office_lng, attendance_radius_meters, name, gst_number, phone, company_code, google_drive_folder_url, verification_status, verification_notes")
       .eq("id", profile.company_id)
       .single();
 
@@ -79,39 +85,65 @@ export default function CompanySettings() {
   };
 
   useEffect(() => {
-    fetchCompanyData();
+    loadSettings();
     fetchGoogleIntegration();
   }, [profile?.company_id, supabase]);
 
-  const handleSubmit = async (event) => {
-    event.preventDefault();
+  const saveOfficeLocation = async () => {
     setMessage("");
     setError("");
     setSavingSettings(true);
 
-    const { error: updateError } = await supabase
+    const { data, error: updateError } = await supabase
       .from("companies")
       .update({
         name: form.name,
         gst_number: form.gst_number,
         phone: form.phone,
-        office_lat: form.office_lat === "" ? null : Number.parseFloat(form.office_lat),
-        office_lng: form.office_lng === "" ? null : Number.parseFloat(form.office_lng),
-        attendance_radius_meters: Number.parseFloat(form.attendance_radius_meters || 200),
+        office_lat: officeLat === "" ? null : Number.parseFloat(officeLat),
+        office_lng: officeLng === "" ? null : Number.parseFloat(officeLng),
+        attendance_radius_meters: Number.parseFloat(officeRadius) || 200,
         google_drive_folder_url: form.google_drive_folder_url || null,
       })
-      .eq("id", profile.company_id);
+      .eq("id", profile.company_id)
+      .select();
+
+    console.log("Save result:", data, updateError);
 
     setSavingSettings(false);
 
     if (updateError) {
+      alert(`Failed to save: ${updateError.message}`);
       setError(updateError.message);
       return;
     }
 
-    await fetchCompanyData();
+    if (data?.[0]) {
+      setOfficeLat(data[0].office_lat ?? "");
+      setOfficeLng(data[0].office_lng ?? "");
+      setOfficeRadius(data[0].attendance_radius_meters ?? 200);
+      applyCompanyRecord(data[0]);
+    }
+
+    alert("Office location saved successfully!");
+    await loadSettings();
     await refreshProfile();
     setMessage("Saved successfully");
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    await saveOfficeLocation();
+  };
+
+  const getCurrentLocation = () => {
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setOfficeLat(pos.coords.latitude);
+        setOfficeLng(pos.coords.longitude);
+      },
+      () => alert("Location access denied"),
+    );
   };
 
   const handleVerificationUpload = async (event) => {
@@ -165,7 +197,7 @@ export default function CompanySettings() {
 
     setVerificationFile(null);
     setUploadingVerification(false);
-    await fetchCompanyData();
+    await loadSettings();
     await refreshProfile();
     setMessage("Verification document uploaded. Company moved to under review.");
   };
@@ -252,8 +284,8 @@ export default function CompanySettings() {
               <input
                 type="number"
                 step="any"
-                value={form.office_lat}
-                onChange={(event) => setForm((current) => ({ ...current, office_lat: event.target.value }))}
+                value={officeLat}
+                onChange={(event) => setOfficeLat(event.target.value)}
               />
             </label>
             <label>
@@ -261,20 +293,21 @@ export default function CompanySettings() {
               <input
                 type="number"
                 step="any"
-                value={form.office_lng}
-                onChange={(event) => setForm((current) => ({ ...current, office_lng: event.target.value }))}
+                value={officeLng}
+                onChange={(event) => setOfficeLng(event.target.value)}
               />
             </label>
           </div>
+          <button type="button" className="ghost-button" onClick={getCurrentLocation}>
+            📍 Use My Current Location
+          </button>
           <label>
             Attendance Radius (Meters)
             <input
               type="number"
               min="50"
-              value={form.attendance_radius_meters}
-              onChange={(event) =>
-                setForm((current) => ({ ...current, attendance_radius_meters: event.target.value }))
-              }
+              value={officeRadius}
+              onChange={(event) => setOfficeRadius(event.target.value)}
               required
             />
           </label>
