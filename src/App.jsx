@@ -42,64 +42,97 @@ function LoadingScreen({ label }) {
   );
 }
 
-function BlockedScreen({ blockReason, onLogout }) {
-  const blockedState = {
+function BlockedScreen({ reason, onLogout }) {
+  const screens = {
     suspended: {
-      accent: "#dc2626",
+      icon: "🔒",
       title: "Account Suspended",
-      lines: [
-        "Your account has been suspended due to a payment issue.",
-        "Contact support@workpulse.com",
-        "Your data is safe and will be restored upon payment.",
-      ],
+      message: "Your account has been suspended due to a payment issue.",
+      sub: "Your data is safe and will be restored immediately upon payment.",
+      contact: "Contact support@workpulse.com",
+      color: "#f59e0b",
     },
     rejected: {
-      accent: "#dc2626",
+      icon: "❌",
       title: "Registration Rejected",
-      lines: [
-        "Your company registration was not approved.",
-        "Contact support@workpulse.com",
-      ],
+      message: "Your company registration was not approved.",
+      sub: "Please contact us for more information.",
+      contact: "Contact support@workpulse.com",
+      color: "#ef4444",
     },
     pending: {
-      accent: "#d97706",
+      icon: "⏳",
       title: "Pending Approval",
-      lines: [
-        "Your company is under review.",
-        "We will notify you once approved.",
-      ],
+      message: "Your company is currently under review.",
+      sub: "We will notify you once your account is approved. This usually takes 24 hours.",
+      contact: "Contact support@workpulse.com",
+      color: "#6366f1",
     },
-  }[blockReason];
+  };
 
-  if (!blockedState) return null;
+  const screen = screens[reason] || screens.pending;
 
   return (
-    <div className="screen-centered">
-      <div className="panel auth-panel access-state-panel">
-        <span
-          aria-hidden="true"
+    <div
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "#f8f7f4",
+        fontFamily: "Inter, sans-serif",
+      }}
+    >
+      <div
+        style={{
+          textAlign: "center",
+          padding: "48px 40px",
+          background: "white",
+          borderRadius: "16px",
+          border: "1px solid #e5e7eb",
+          maxWidth: "440px",
+          width: "100%",
+        }}
+      >
+        <div style={{ fontSize: 48, marginBottom: 16 }}>{screen.icon}</div>
+        <h2
           style={{
-            width: 56,
-            height: 56,
-            borderRadius: 999,
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: `${blockedState.accent}18`,
-            color: blockedState.accent,
-            fontSize: 28,
+            fontSize: 22,
             fontWeight: 700,
-            margin: "0 auto 12px",
+            color: screen.color,
+            marginBottom: 12,
           }}
         >
-          !
-        </span>
-        <div className="stack">
-          <h1>{blockedState.title}</h1>
-          {blockedState.lines.map((line) => (
-            <p key={line}>{line}</p>
-          ))}
-        </div>
+          {screen.title}
+        </h2>
+        <p
+          style={{
+            color: "#374151",
+            fontSize: 15,
+            marginBottom: 8,
+            lineHeight: 1.6,
+          }}
+        >
+          {screen.message}
+        </p>
+        <p
+          style={{
+            color: "#6b7280",
+            fontSize: 13,
+            marginBottom: 8,
+          }}
+        >
+          {screen.sub}
+        </p>
+        <p
+          style={{
+            color: "#6366f1",
+            fontSize: 13,
+            marginBottom: 24,
+          }}
+        >
+          {screen.contact}
+        </p>
         <button type="button" className="primary-button" onClick={onLogout}>
           Logout
         </button>
@@ -111,7 +144,7 @@ function BlockedScreen({ blockReason, onLogout }) {
 function ProtectedRoute({ session, profile, loading, blockReason, onLogout, children }) {
   if (loading) return <LoadingScreen label="Preparing your workspace..." />;
   if (!session) return <Navigate to="/login" replace />;
-  if (blockReason) return <BlockedScreen blockReason={blockReason} onLogout={onLogout} />;
+  if (blockReason) return <BlockedScreen reason={blockReason} onLogout={onLogout} />;
   if (!profile) return <LoadingScreen label="Loading your profile..." />;
   return children;
 }
