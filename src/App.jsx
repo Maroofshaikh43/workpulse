@@ -171,11 +171,11 @@ export default function App() {
       return;
     }
 
-      const { data: userProfile, error: profileError } = await supabase
-        .from("users")
-        .select("*, companies(status, name)")
-        .eq("id", currentSession.user.id)
-        .single();
+    const { data: userProfile, error: profileError } = await supabase
+      .from("users")
+      .select("*, companies(id, name, status)")
+      .eq("id", currentSession.user.id)
+      .single();
 
     if (profileError) {
       setAuthError(profileError.message);
@@ -185,7 +185,20 @@ export default function App() {
       return;
     }
 
-    setProfile(userProfile);
+    if (!userProfile) {
+      await supabase.auth.signOut();
+      setProfile(null);
+      setCompany(null);
+      setLoading(false);
+      return;
+    }
+
+    if (userProfile.role === "super_admin") {
+      setProfile(userProfile);
+      setCompany(userProfile.companies ?? null);
+      setLoading(false);
+      return;
+    }
 
     if (userProfile.role !== "admin" && !currentSession.user.email_confirmed_at) {
       await supabase.auth.signOut();
@@ -198,38 +211,41 @@ export default function App() {
 
     const companyStatus = userProfile?.companies?.status;
 
-    if (userProfile.role !== "super_admin") {
-      if (companyStatus === "suspended") {
-        setCompany({
-          id: userProfile.company_id,
-          status: companyStatus,
-          name: userProfile?.companies?.name ?? "",
-        });
-        setBlockReason("suspended");
-        setLoading(false);
-        return;
-      }
-      if (companyStatus === "rejected") {
-        setCompany({
-          id: userProfile.company_id,
-          status: companyStatus,
-          name: userProfile?.companies?.name ?? "",
-        });
-        setBlockReason("rejected");
-        setLoading(false);
-        return;
-      }
-      if (companyStatus === "pending") {
-        setCompany({
-          id: userProfile.company_id,
-          status: companyStatus,
-          name: userProfile?.companies?.name ?? "",
-        });
-        setBlockReason("pending");
-        setLoading(false);
-        return;
-      }
+    if (companyStatus === "suspended") {
+      setProfile(null);
+      setCompany({
+        id: userProfile.company_id,
+        status: companyStatus,
+        name: userProfile?.companies?.name ?? "",
+      });
+      setBlockReason("suspended");
+      setLoading(false);
+      return;
     }
+    if (companyStatus === "rejected") {
+      setProfile(null);
+      setCompany({
+        id: userProfile.company_id,
+        status: companyStatus,
+        name: userProfile?.companies?.name ?? "",
+      });
+      setBlockReason("rejected");
+      setLoading(false);
+      return;
+    }
+    if (companyStatus === "pending") {
+      setProfile(null);
+      setCompany({
+        id: userProfile.company_id,
+        status: companyStatus,
+        name: userProfile?.companies?.name ?? "",
+      });
+      setBlockReason("pending");
+      setLoading(false);
+      return;
+    }
+
+    setProfile(userProfile);
 
     if (userProfile.company_id) {
       const { data: companyData, error: companyError } = await supabase

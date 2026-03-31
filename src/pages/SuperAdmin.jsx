@@ -210,14 +210,14 @@ export default function SuperAdmin() {
     };
   }, [attendanceByCompany, selectedCompany]);
 
-  const updateCompanyStatus = async (company, nextStatus) => {
+  const updateCompanyStatus = async (companyId, nextStatus) => {
     setError("");
     setMessage("");
-    setActionId(`${company.id}-${nextStatus}`);
+    setActionId(`${companyId}-${nextStatus}`);
 
     const updates = {
       status: nextStatus,
-      verification_notes: notes[company.id] || null,
+      verification_notes: notes[companyId] || null,
       verified_by: profile.id,
     };
 
@@ -228,44 +228,49 @@ export default function SuperAdmin() {
       updates.verification_status = "rejected";
     }
 
-    const { error: updateError } = await supabase.from("companies").update({ status: nextStatus, ...updates }).eq("id", company.id);
+    const { data, error: updateError } = await supabase
+      .from("companies")
+      .update({ status: nextStatus, ...updates })
+      .eq("id", companyId)
+      .select();
 
     setActionId("");
     if (updateError) {
-      console.error(updateError);
+      console.error("Status update error:", updateError);
       setError(updateError.message);
       return;
     }
 
+    console.log("Updated successfully:", data);
     setMessage(`Company status updated to ${nextStatus}.`);
     await fetchCompanies();
   };
 
   const renderActionButtons = (company) => (
     <div className="action-column">
-      <button
-        type="button"
-        className="primary-button"
-        onClick={() => updateCompanyStatus(company, "approved")}
-        disabled={company.status === "approved" || actionId === `${company.id}-approved`}
-      >
-        {actionId === `${company.id}-approved` ? "Saving..." : company.status === "suspended" ? "Reactivate" : "Approve"}
+        <button
+          type="button"
+          className="primary-button"
+          onClick={() => updateCompanyStatus(company.id, "approved")}
+          disabled={company.status === "approved" || actionId === `${company.id}-approved`}
+        >
+          {actionId === `${company.id}-approved` ? "Saving..." : company.status === "suspended" ? "Reactivate" : "Approve"}
       </button>
-      <button
-        type="button"
-        className="ghost-button"
-        onClick={() => updateCompanyStatus(company, "suspended")}
-        disabled={company.status !== "approved" || actionId === `${company.id}-suspended`}
-      >
-        {actionId === `${company.id}-suspended` ? "Suspending..." : "Suspend"}
+        <button
+          type="button"
+          className="ghost-button"
+          onClick={() => updateCompanyStatus(company.id, "suspended")}
+          disabled={company.status !== "approved" || actionId === `${company.id}-suspended`}
+        >
+          {actionId === `${company.id}-suspended` ? "Suspending..." : "Suspend"}
       </button>
-      <button
-        type="button"
-        className="link-button danger"
-        onClick={() => updateCompanyStatus(company, "rejected")}
-        disabled={company.status === "rejected" || actionId === `${company.id}-rejected`}
-      >
-        {actionId === `${company.id}-rejected` ? "Rejecting..." : "Reject"}
+        <button
+          type="button"
+          className="link-button danger"
+          onClick={() => updateCompanyStatus(company.id, "rejected")}
+          disabled={company.status === "rejected" || actionId === `${company.id}-rejected`}
+        >
+          {actionId === `${company.id}-rejected` ? "Rejecting..." : "Reject"}
       </button>
     </div>
   );
