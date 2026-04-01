@@ -208,7 +208,8 @@ export default function Attendance() {
     const canvas = canvasRef.current;
     canvas.width = videoRef.current.videoWidth;
     canvas.height = videoRef.current.videoHeight;
-    const context = canvas.getContext("2d");
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return;
     context.drawImage(videoRef.current, 0, 0);
     setSelfiePreview(canvas.toDataURL("image/jpeg", 0.92));
     setVerifyMessage("");

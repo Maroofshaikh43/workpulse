@@ -14,11 +14,14 @@ export default async function handler(req, res) {
   try {
     const { messages, context } = req.body ?? {};
     const modelNames = [
-      "deepseek-ai/deepseek-v3-1",
       "deepseek-ai/deepseek-v3.1",
-      "deepseek-ai/deepseek-v3-1-terminus",
+      "deepseek-ai/deepseek-v3.1-terminus",
     ];
     let lastError = "";
+
+    if (!process.env.NVIDIA_API_KEY) {
+      return res.status(500).json({ error: "Missing NVIDIA_API_KEY on server" });
+    }
 
     console.log("API Key first 10 chars:", process.env.NVIDIA_API_KEY?.substring(0, 10));
 
@@ -58,9 +61,13 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply: content, model: modelName });
     }
 
-    return res.status(500).json({ error: "AI service error", details: lastError || "No model succeeded" });
+    return res.status(500).json({
+      error: "AI service error",
+      details: lastError || "No model succeeded",
+      triedModels: modelNames,
+    });
   } catch (error) {
     console.error("Handler error:", error);
-    return res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({ error: "Internal server error", details: error.message });
   }
 }

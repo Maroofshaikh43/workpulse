@@ -208,7 +208,7 @@ export default function App() {
       .from("users")
       .select("*, companies(id, name, status)")
       .eq("id", currentSession.user.id)
-      .single();
+      .maybeSingle();
 
     if (profileError) {
       setAuthError(profileError.message);
