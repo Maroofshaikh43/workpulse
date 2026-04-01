@@ -196,9 +196,12 @@ create table if not exists public.daily_report_submissions (
   company_id uuid not null references public.companies (id) on delete cascade,
   date date not null,
   drive_link text,
+  drive_link_opened_at timestamptz,
   submitted_at timestamptz not null default timezone('utc', now()),
   unique (user_id, date)
 );
+
+alter table public.daily_report_submissions add column if not exists drive_link_opened_at timestamptz;
 
 create index if not exists idx_users_company_id on public.users (company_id);
 create index if not exists idx_attendance_company_date on public.attendance (company_id, date);

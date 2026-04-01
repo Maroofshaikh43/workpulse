@@ -64,6 +64,7 @@ export default function DailyReport() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [driveOpened, setDriveOpened] = useState(false);
 
   const driveDestination = profile?.daily_report_drive_url || company?.google_drive_folder_url || "";
 
@@ -95,6 +96,7 @@ export default function DailyReport() {
     }
 
     setSubmission(submissionResponse.data ?? null);
+    setDriveOpened(Boolean(submissionResponse.data?.drive_link_opened_at));
 
     const structured = parseStructuredTasks(reportResponse.data?.tasks);
     if (structured) {
@@ -128,12 +130,12 @@ export default function DailyReport() {
 
   const status = useMemo(() => {
     if (!company?.google_drive_folder_url && !profile?.daily_report_drive_url) {
-      return "Admin has not configured a company or employee Drive destination yet. Reports will still save inside WorkPulse.";
+      return "Admin has not configured a company or employee Drive destination yet.";
     }
     if (!profile?.daily_report_drive_url) {
-      return "Your report will save in WorkPulse and link to the admin's company Drive destination.";
+      return "Use the company report destination assigned by admin, then come back and submit today's report.";
     }
-    return "Your report will save in WorkPulse and use your assigned Drive destination for the admin workflow.";
+    return "Open your assigned Drive report from WorkPulse first, then come back and submit today's report.";
   }, [company, profile]);
 
   const totalHours = useMemo(
@@ -170,10 +172,47 @@ export default function DailyReport() {
     );
   };
 
+  const openAssignedDrive = async () => {
+    setError("");
+    setMessage("");
+
+    if (!driveDestination) {
+      setError("No Drive link has been assigned yet.");
+      return;
+    }
+
+    const { error: upsertError } = await supabase.from("daily_report_submissions").upsert(
+      {
+        user_id: profile.id,
+        company_id: profile.company_id,
+        date: getToday(),
+        drive_link: driveDestination,
+        drive_link_opened_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id,date" },
+    );
+
+    if (upsertError) {
+      setError(upsertError.message);
+      return;
+    }
+
+    setDriveOpened(true);
+    window.open(driveDestination, "_blank", "noopener,noreferrer");
+    setMessage("Drive report opened. After filling it, come back and submit today's report.");
+    loadReportState();
+  };
+
   const saveReport = async () => {
     setError("");
     setMessage("");
     setSaving(true);
+
+    if (!driveOpened) {
+      setError("Open your assigned Drive report from WorkPulse before submitting.");
+      setSaving(false);
+      return;
+    }
 
     const validRows = rows
       .map((row, index) => ({
@@ -213,6 +252,7 @@ export default function DailyReport() {
           company_id: profile.company_id,
           date: getToday(),
           drive_link: driveDestination || null,
+          drive_link_opened_at: submission?.drive_link_opened_at ?? new Date().toISOString(),
           submitted_at: new Date().toISOString(),
         },
         { onConflict: "user_id,date" },
@@ -244,9 +284,9 @@ export default function DailyReport() {
         </div>
         <div className="mini-card stack">
           <strong>How this works</strong>
-          <p>1. Add your work entries in the report table below.</p>
-          <p>2. Save the report to store it inside WorkPulse for admin review.</p>
-          <p>3. The submission also links to the configured company or employee Drive destination.</p>
+          <p>1. Open your assigned Drive report from WorkPulse.</p>
+          <p>2. Fill your report details in Drive and come back here.</p>
+          <p>3. Save the structured report in WorkPulse to mark today's report as submitted.</p>
           <p>{status}</p>
         </div>
         {!!error && <div className="alert error">{error}</div>}
@@ -352,11 +392,22 @@ export default function DailyReport() {
               <p>{driveDestination || "No Drive destination configured yet."}</p>
             </div>
           </div>
+          <div className="mini-card">
+            <strong>Drive Access Status</strong>
+            <p>
+              {driveOpened
+                ? "Drive link opened in this session. You can now submit today's daily report."
+                : "Submit stays locked until you open the assigned Drive link from here."}
+            </p>
+          </div>
           <div className="row-end">
+            <button type="button" className="ghost-button" onClick={openAssignedDrive} disabled={!driveDestination}>
+              Open Assigned Drive Report
+            </button>
             <button type="button" className="ghost-button" onClick={addRow}>
               Add Report Row
             </button>
-            <button type="button" className="primary-button" onClick={saveReport} disabled={saving}>
+            <button type="button" className="primary-button" onClick={saveReport} disabled={saving || !driveOpened}>
               {saving ? "Saving..." : "Save Today's Report"}
             </button>
           </div>

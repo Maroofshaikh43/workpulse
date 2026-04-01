@@ -214,8 +214,23 @@ export default function Reports() {
                   <p>Date: {formatDate(selectedReport.date)}</p>
                   <p>Total Hours: {selectedReport.hours}</p>
                   <p>Drive Destination: {selectedReport.submission?.drive_link ?? "Not linked"}</p>
+                  <p>Drive Opened: {selectedReport.submission?.drive_link_opened_at ? "Yes" : "No"}</p>
+                  <p>Submitted: {selectedReport.submission?.submitted_at ? "Yes" : "No"}</p>
                 </div>
               </div>
+
+              {selectedReport.submission?.drive_link ? (
+                <div className="row-end">
+                  <a
+                    className="ghost-button"
+                    href={selectedReport.submission.drive_link}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open Employee Drive Report
+                  </a>
+                </div>
+              ) : null}
 
               <div className="table-wrap">
                 <table className="report-entry-table">
