@@ -1,4 +1,4 @@
-import * as faceapi from "face-api.js";
+import * as faceapi from "@vladmandic/face-api";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { formatLongDate, formatTime, getToday } from "../utils";
@@ -100,7 +100,7 @@ export default function Attendance() {
       setModelLoading(true);
       setModelStatus("Loading face verification...");
 
-      const MODEL_URL = "https://cdn.jsdelivr.net/npm/face-api.js/weights";
+      const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model";
 
       await Promise.all([
         faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
