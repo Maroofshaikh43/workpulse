@@ -1,4 +1,5 @@
 export default async function handler(req, res) {
+  res.setHeader("X-WorkPulse-Proxy-Version", "2026-04-01-model-fix");
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");

@@ -18,7 +18,16 @@ export const askAI = async (prompt, context) => {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(errorText || "Request failed");
+      let parsedError = errorText;
+
+      try {
+        const errorJson = JSON.parse(errorText);
+        parsedError = errorJson.details || errorJson.error || errorText;
+      } catch {
+        parsedError = errorText || "Request failed";
+      }
+
+      throw new Error(parsedError || "Request failed");
     }
 
     const data = await response.json();
