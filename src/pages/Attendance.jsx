@@ -100,7 +100,7 @@ export default function Attendance() {
       setModelLoading(true);
       setModelStatus("Loading face verification...");
 
-      const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model";
+      const MODEL_URL = "/models/face-api";
 
       await Promise.all([
         faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
