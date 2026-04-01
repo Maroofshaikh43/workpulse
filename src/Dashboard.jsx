@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import AIAssistant from "./components/AIAssistant";
 import { Icon } from "./brand";
 import { formatLiveDateTime } from "./utils";
 
@@ -250,6 +251,9 @@ export default function Dashboard({ supabase, profile, company, refreshProfile, 
             setPendingLeaves: () => {},
           }}
         />
+        {profile && company?.status === "approved" ? (
+          <AIAssistant supabase={supabase} profile={profile} company={company} />
+        ) : null}
       </main>
     </div>
   );
