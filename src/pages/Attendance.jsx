@@ -1,3 +1,4 @@
+import * as faceapi from "face-api.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { formatLongDate, formatTime, getToday } from "../utils";
@@ -15,10 +16,19 @@ function getDistance(lat1, lng1, lat2, lng2) {
   return earthRadius * c;
 }
 
+function formatCheckTime(date) {
+  return date.toLocaleTimeString("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export default function Attendance() {
   const { supabase, profile } = useOutletContext();
   const videoRef = useRef(null);
+  const canvasRef = useRef(null);
   const streamRef = useRef(null);
+  const autoCheckInTimerRef = useRef(null);
   const [todayAttendance, setTodayAttendance] = useState(null);
   const [registeredPhotoUrl, setRegisteredPhotoUrl] = useState("");
   const [companyConfig, setCompanyConfig] = useState(null);
@@ -32,6 +42,18 @@ export default function Attendance() {
   const [action, setAction] = useState("");
   const [cameraOpen, setCameraOpen] = useState(false);
   const [attendanceState, setAttendanceState] = useState("not_checked_in");
+  const [modelLoading, setModelLoading] = useState(false);
+  const [modelStatus, setModelStatus] = useState("");
+  const [verifying, setVerifying] = useState(false);
+  const [verifyMessage, setVerifyMessage] = useState("");
+  const [verifyTone, setVerifyTone] = useState("");
+  const [gpsVerified, setGpsVerified] = useState(false);
+  const [faceVerified, setFaceVerified] = useState(false);
+  const [verifyConfidence, setVerifyConfidence] = useState(null);
+  const [attempts, setAttempts] = useState(0);
+  const [blocked, setBlocked] = useState(false);
+  const [checkInTime, setCheckInTime] = useState("");
+  const [checkOutTime, setCheckOutTime] = useState("");
 
   const attendanceRadius = companyConfig?.attendance_radius_meters ?? 200;
   const officeReady = useMemo(
@@ -51,13 +73,53 @@ export default function Attendance() {
     setCameraOpen(false);
   };
 
-  const resetSelfie = () => {
+  const clearAutoCheckInTimer = () => {
+    if (autoCheckInTimerRef.current) {
+      window.clearTimeout(autoCheckInTimerRef.current);
+      autoCheckInTimerRef.current = null;
+    }
+  };
+
+  const resetVerificationState = (keepGps = true) => {
     stopCamera();
+    clearAutoCheckInTimer();
     setSelfiePreview("");
+    setFaceVerified(false);
+    setVerifyConfidence(null);
+    setVerifyMessage("");
+    setVerifyTone("");
+    if (!keepGps) {
+      setGpsVerified(false);
+      setLocation(null);
+      setDistance(null);
+    }
+  };
+
+  const loadModels = async () => {
+    try {
+      setModelLoading(true);
+      setModelStatus("Loading face verification...");
+
+      const MODEL_URL = "https://cdn.jsdelivr.net/npm/face-api.js/weights";
+
+      await Promise.all([
+        faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
+        faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+        faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
+      ]);
+
+      setModelStatus("Face verification ready");
+    } catch (modelError) {
+      console.error("Model loading error:", modelError);
+      setError("Face verification models could not be loaded. Please refresh and try again.");
+      setModelStatus("Face verification unavailable");
+    } finally {
+      setModelLoading(false);
+    }
   };
 
   const fetchAttendancePageData = async () => {
-    if (!profile?.id || !profile?.company_id) return;
+    if (!profile?.id || !profile?.company_id) return null;
 
     setPageLoading(true);
 
@@ -88,10 +150,16 @@ export default function Attendance() {
 
     if (attendanceData?.check_in_time && attendanceData?.check_out_time) {
       setAttendanceState("completed");
+      setCheckInTime(formatTime(attendanceData.check_in_time));
+      setCheckOutTime(formatTime(attendanceData.check_out_time));
     } else if (attendanceData?.check_in_time && !attendanceData?.check_out_time) {
       setAttendanceState("checked_in");
+      setCheckInTime(formatTime(attendanceData.check_in_time));
+      setCheckOutTime("");
     } else {
       setAttendanceState("not_checked_in");
+      setCheckInTime("");
+      setCheckOutTime("");
     }
 
     setPageLoading(false);
@@ -104,7 +172,12 @@ export default function Attendance() {
 
   useEffect(() => {
     fetchAttendancePageData();
-    return () => stopCamera();
+    loadModels();
+
+    return () => {
+      stopCamera();
+      clearAutoCheckInTimer();
+    };
   }, [profile?.id, profile?.company_id]);
 
   useEffect(() => {
@@ -114,6 +187,8 @@ export default function Attendance() {
   }, [cameraOpen]);
 
   const openCamera = async () => {
+    setError("");
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
       streamRef.current = stream;
@@ -128,23 +203,182 @@ export default function Attendance() {
   };
 
   const captureSelfie = () => {
-    if (!videoRef.current) return;
-    const canvas = document.createElement("canvas");
+    if (!videoRef.current || !canvasRef.current) return;
+
+    const canvas = canvasRef.current;
     canvas.width = videoRef.current.videoWidth;
     canvas.height = videoRef.current.videoHeight;
     const context = canvas.getContext("2d");
     context.drawImage(videoRef.current, 0, 0);
-    setSelfiePreview(canvas.toDataURL("image/png"));
+    setSelfiePreview(canvas.toDataURL("image/jpeg", 0.92));
+    setVerifyMessage("");
+    setVerifyTone("");
+    setVerifyConfidence(null);
+    setFaceVerified(false);
     stopCamera();
+  };
+
+  const markCheckIn = async (isFaceVerified) => {
+    try {
+      setLoading(true);
+      setAction("checkin");
+      const now = new Date();
+      const today = getToday();
+      const time = now.toTimeString().slice(0, 8);
+
+      const { data: existing, error: existingError } = await supabase
+        .from("attendance")
+        .select("*")
+        .eq("user_id", profile.id)
+        .eq("date", today)
+        .maybeSingle();
+
+      if (existingError) {
+        throw existingError;
+      }
+
+      if (existing) {
+        setVerifyMessage("Already checked in today!");
+        setVerifyTone("error");
+        return;
+      }
+
+      const hour = now.getHours();
+      const minute = now.getMinutes();
+      const isLate = hour > 9 || (hour === 9 && minute > 30);
+
+      const { error: insertError } = await supabase.from("attendance").insert({
+        user_id: profile.id,
+        company_id: profile.company_id,
+        date: today,
+        check_in_time: time,
+        location_lat: location?.lat ?? null,
+        location_lng: location?.lng ?? null,
+        face_verified: isFaceVerified,
+        status: isLate ? "late" : "present",
+      });
+
+      if (insertError) {
+        throw insertError;
+      }
+
+      setAttendanceState("checked_in");
+      setCheckInTime(formatCheckTime(now));
+      setMessage(`Attendance marked successfully at ${formatCheckTime(now)}.`);
+      setVerifyMessage("Checking you in...");
+      setVerifyTone("success");
+      resetVerificationState(false);
+      await fetchAttendancePageData();
+    } catch (markError) {
+      console.error("markCheckIn error:", markError);
+      setError(`Check in failed: ${markError.message}`);
+    } finally {
+      setLoading(false);
+      setAction("");
+      clearAutoCheckInTimer();
+    }
+  };
+
+  const verifyFaces = async () => {
+    try {
+      if (!registeredPhotoUrl) {
+        setError("Please upload profile photo in Profile settings before checking in.");
+        return;
+      }
+
+      if (!canvasRef.current || !selfiePreview) {
+        setVerifyMessage("Take a live selfie before verifying.");
+        setVerifyTone("error");
+        return;
+      }
+
+      setVerifying(true);
+      setVerifyMessage("Analyzing faces...");
+      setVerifyTone("pending");
+
+      const profileImg = await faceapi.fetchImage(registeredPhotoUrl);
+      const selfieImg = canvasRef.current;
+
+      const profileDetection = await faceapi
+        .detectSingleFace(profileImg)
+        .withFaceLandmarks()
+        .withFaceDescriptor();
+
+      const selfieDetection = await faceapi
+        .detectSingleFace(selfieImg)
+        .withFaceLandmarks()
+        .withFaceDescriptor();
+
+      if (!profileDetection) {
+        setVerifyMessage("Could not detect face in your profile photo. Please update your profile photo.");
+        setVerifyTone("error");
+        return;
+      }
+
+      if (!selfieDetection) {
+        setVerifyMessage("Could not detect your face in selfie. Please ensure good lighting and face the camera directly.");
+        setVerifyTone("error");
+        setSelfiePreview("");
+        return;
+      }
+
+      const distanceBetweenFaces = faceapi.euclideanDistance(profileDetection.descriptor, selfieDetection.descriptor);
+      const confidence = Math.max(0, Math.round((1 - distanceBetweenFaces) * 100));
+      const isMatch = distanceBetweenFaces < 0.5;
+
+      console.log("Face distance:", distanceBetweenFaces);
+
+      setVerifyConfidence(confidence);
+
+      if (isMatch) {
+        setVerifyMessage(`Face verified ✓ ${confidence}% match`);
+        setVerifyTone("success");
+        setFaceVerified(true);
+        autoCheckInTimerRef.current = window.setTimeout(() => {
+          markCheckIn(true);
+        }, 1000);
+        return;
+      }
+
+      setAttempts((current) => {
+        const nextAttempts = current + 1;
+
+        if (nextAttempts >= 3) {
+          setBlocked(true);
+          setVerifyMessage("Too many failed attempts. Please contact your HR or Admin.");
+          setVerifyTone("error");
+        } else {
+          setVerifyMessage(`Face did not match ✗ ${confidence}% match. Attempt ${nextAttempts} of 3. Please retake selfie.`);
+          setVerifyTone("error");
+          setSelfiePreview("");
+        }
+
+        return nextAttempts;
+      });
+    } catch (verifyError) {
+      console.error("Face verify error:", verifyError);
+      setVerifyMessage("Verification error. Please try again.");
+      setVerifyTone("error");
+      setSelfiePreview("");
+    } finally {
+      setVerifying(false);
+    }
   };
 
   const verifyLocation = async () => {
     setError("");
     setMessage("");
-    resetSelfie();
+    resetVerificationState(false);
+    setAttempts(0);
+    setBlocked(false);
+
+    if (modelLoading) {
+      setError("Face verification is still loading. Please wait a moment.");
+      return;
+    }
 
     if (!registeredPhotoUrl) {
-      setError("Please upload profile photo in Profile settings before checking in");
+      setError("Please upload profile photo in Profile settings before checking in.");
       return;
     }
 
@@ -158,9 +392,7 @@ export default function Attendance() {
       nextCompany.office_lng === null ||
       nextCompany.office_lng === undefined
     ) {
-      setError(
-        "Your admin has not set the office location yet. Please contact your admin to set the office GPS coordinates in Company Settings.",
-      );
+      setError("Your admin has not set the office location yet. Please contact your admin to set the office GPS coordinates in Company Settings.");
       return;
     }
 
@@ -182,10 +414,14 @@ export default function Attendance() {
 
         if (nextDistance > attendanceRadius) {
           stopCamera();
+          setGpsVerified(false);
           setError(`You are ${Math.round(nextDistance)}m away from office. Must be within ${attendanceRadius}m to check in.`);
           return;
         }
 
+        setGpsVerified(true);
+        setVerifyMessage("");
+        setVerifyTone("");
         setMessage(`GPS verified within ${Math.round(nextDistance)} meters. Camera unlocked.`);
         await openCamera();
       },
@@ -194,64 +430,7 @@ export default function Attendance() {
     );
   };
 
-  const handleCheckIn = async () => {
-    setError("");
-    setMessage("");
-
-    if (!registeredPhotoUrl) {
-      setError("Please upload profile photo in Profile settings before checking in");
-      return;
-    }
-
-    if (!location || distance === null || distance > attendanceRadius) {
-      setError("Verify GPS successfully before checking in.");
-      return;
-    }
-
-    if (!selfiePreview) {
-      setError("Capture a live selfie after GPS verification.");
-      return;
-    }
-
-    if (attendanceState !== "not_checked_in") {
-      setError("You have already checked in for today.");
-      return;
-    }
-
-    setLoading(true);
-    setAction("checkin");
-    const now = new Date();
-    const time = now.toTimeString().slice(0, 8);
-    const status = time > "09:30:00" ? "late" : "present";
-
-    const { error: insertError } = await supabase.from("attendance").upsert(
-      {
-        user_id: profile.id,
-        company_id: profile.company_id,
-        date: getToday(),
-        check_in_time: time,
-        location_lat: location.lat,
-        location_lng: location.lng,
-        face_verified: true,
-        status,
-      },
-      { onConflict: "user_id,date" },
-    );
-
-    setLoading(false);
-    setAction("");
-
-    if (insertError) {
-      setError(insertError.message);
-      return;
-    }
-
-    resetSelfie();
-    setMessage(`Attendance marked successfully at ${formatTime(time)}.`);
-    await fetchAttendancePageData();
-  };
-
-  const handleCheckOut = async () => {
+  const markCheckOut = async () => {
     const { data: reportSubmission } = await supabase
       .from("daily_report_submissions")
       .select("id")
@@ -269,10 +448,10 @@ export default function Attendance() {
     setError("");
     setMessage("");
     const now = new Date();
-    const checkoutTime = now.toTimeString().slice(0, 8);
+    const checkoutTimeValue = now.toTimeString().slice(0, 8);
     const { error: updateError } = await supabase
       .from("attendance")
-      .update({ check_out_time: checkoutTime })
+      .update({ check_out_time: checkoutTimeValue })
       .eq("user_id", profile.id)
       .eq("date", getToday());
 
@@ -280,20 +459,30 @@ export default function Attendance() {
     setAction("");
 
     if (updateError) {
-      setError(updateError.message);
+      setError(`Check out failed: ${updateError.message}`);
       return;
     }
 
-    setMessage(`Check-out recorded successfully at ${formatTime(checkoutTime)}.`);
+    setAttendanceState("completed");
+    setCheckOutTime(formatCheckTime(now));
+    setMessage(`Check-out recorded successfully at ${formatCheckTime(now)}.`);
     await fetchAttendancePageData();
   };
 
-  if (pageLoading) {
-    return <section className="panel empty-state">Loading attendance...</section>;
+  if (pageLoading || modelLoading) {
+    return (
+      <section className="panel empty-state attendance-model-loading">
+        <div className="attendance-spinner" />
+        <strong>Loading face verification system...</strong>
+        <p>{modelStatus || "Preparing attendance..."}</p>
+      </section>
+    );
   }
 
   return (
     <section className="page-stack">
+      <canvas ref={canvasRef} className="attendance-hidden-canvas" />
+
       <div className="panel">
         <div className="section-header">
           <h2>Attendance</h2>
@@ -308,11 +497,11 @@ export default function Attendance() {
           </div>
           <div className="stat-card">
             <span>Check In</span>
-            <strong>{formatTime(todayAttendance?.check_in_time)}</strong>
+            <strong>{checkInTime || formatTime(todayAttendance?.check_in_time)}</strong>
           </div>
           <div className="stat-card">
             <span>Check Out</span>
-            <strong>{formatTime(todayAttendance?.check_out_time)}</strong>
+            <strong>{checkOutTime || formatTime(todayAttendance?.check_out_time)}</strong>
           </div>
           <div className="stat-card">
             <span>Allowed Radius</span>
@@ -325,106 +514,177 @@ export default function Attendance() {
         <div className="panel">
           <div className="section-header">
             <h3>Step 1: GPS Verification</h3>
-            <p>Verify your current location to unlock the selfie check-in flow.</p>
+            <p>Verify your current location to unlock the face verification flow.</p>
           </div>
           <div className="stack">
             <div className="mini-card">
               <strong>Today's Date</strong>
               <p>{formatLongDate()}</p>
             </div>
+
             {attendanceState === "checked_in" ? (
-              <div className="mini-card">
-                <strong>Already checked in</strong>
-                <p>You checked in at {formatTime(todayAttendance?.check_in_time)}</p>
+              <div className="mini-card attendance-state-card success">
+                <strong>You checked in at {checkInTime || formatTime(todayAttendance?.check_in_time)} ✓</strong>
+                <p>Face verification passed and your attendance is active for today.</p>
               </div>
             ) : null}
+
             {attendanceState === "completed" ? (
-              <div className="mini-card">
-                <strong>Attendance completed for today</strong>
-                <p>Check in: {formatTime(todayAttendance?.check_in_time)}</p>
-                <p>Check out: {formatTime(todayAttendance?.check_out_time)}</p>
+              <div className="mini-card attendance-state-card success">
+                <strong>Attendance completed for today ✓</strong>
+                <p>Check in: {checkInTime || formatTime(todayAttendance?.check_in_time)}</p>
+                <p>Check out: {checkOutTime || formatTime(todayAttendance?.check_out_time)}</p>
                 <p>See you tomorrow!</p>
               </div>
             ) : null}
+
             <div className="mini-card">
               <strong>Your registered face</strong>
               {registeredPhotoUrl ? (
                 <img src={registeredPhotoUrl} alt="Your registered face" className="photo-preview comparison-photo" />
               ) : (
-                <p>Please upload profile photo in Profile settings before checking in</p>
+                <p>Please upload profile photo in Profile settings before checking in.</p>
               )}
             </div>
+
             {attendanceState === "not_checked_in" ? (
-              <button type="button" className="primary-button" onClick={verifyLocation}>
-                Verify GPS & Unlock Camera
+              <button
+                type="button"
+                className="primary-button"
+                onClick={verifyLocation}
+                disabled={loading || verifying || blocked || !registeredPhotoUrl || !officeReady}
+              >
+                Verify GPS
               </button>
             ) : null}
-            {location && (
+
+            {!officeReady ? (
+              <div className="mini-card">
+                <p>Camera is locked until your company office location is configured.</p>
+              </div>
+            ) : null}
+
+            {location ? (
               <div className="mini-card">
                 <p>
                   Current location: {location.lat.toFixed(5)}, {location.lng.toFixed(5)}
                 </p>
-                {distance !== null && <p>Distance from office: {Math.round(distance)} meters</p>}
+                {distance !== null ? <p>Distance from office: {Math.round(distance)} meters</p> : null}
               </div>
-            )}
+            ) : null}
           </div>
         </div>
 
         <div className="panel">
           <div className="section-header">
-            <h3>Step 2: Face Comparison</h3>
-            <p>Compare your registered photo with a live selfie before final check-in.</p>
+            <h3>Step 2: Face Verification</h3>
+            <p>Capture a live selfie and compare it with your registered profile photo.</p>
           </div>
 
-          {!cameraOpen && !selfiePreview && attendanceState === "not_checked_in" && (
-            <div className="empty-state">
-              Camera stays locked until GPS verification succeeds inside the office radius.
-            </div>
-          )}
+          {attendanceState === "not_checked_in" && !gpsVerified && !cameraOpen && !selfiePreview ? (
+            <div className="empty-state">Camera is locked until GPS verification succeeds inside the office radius.</div>
+          ) : null}
 
-          {cameraOpen && (
-            <div className="camera-card">
-              <video ref={videoRef} autoPlay playsInline className="camera-view" />
-              <div className="row-end">
-                <button type="button" className="ghost-button" onClick={stopCamera}>
-                  Cancel
-                </button>
-                <button type="button" className="primary-button" onClick={captureSelfie}>
-                  Capture Selfie
-                </button>
-              </div>
-            </div>
-          )}
-
-          {selfiePreview && (
+          {attendanceState === "not_checked_in" && gpsVerified && !cameraOpen && !selfiePreview && !blocked ? (
             <div className="stack">
               <div className="comparison-grid">
                 <div className="mini-card">
                   <strong>Registered</strong>
                   <img src={registeredPhotoUrl} alt="Registered photo" className="photo-preview comparison-photo" />
                 </div>
+              </div>
+              <button type="button" className="primary-button" onClick={openCamera} disabled={loading || verifying}>
+                Open Camera
+              </button>
+            </div>
+          ) : null}
+
+          {cameraOpen ? (
+            <div className="stack">
+              <div className="comparison-grid">
                 <div className="mini-card">
-                  <strong>Live Selfie</strong>
-                  <img src={selfiePreview} alt="Live selfie" className="photo-preview comparison-photo" />
+                  <strong>Your registered face</strong>
+                  <img src={registeredPhotoUrl} alt="Registered photo" className="photo-preview comparison-photo" />
+                </div>
+                <div className="mini-card">
+                  <strong>Live Camera</strong>
+                  <video ref={videoRef} autoPlay playsInline className="camera-view comparison-photo" />
                 </div>
               </div>
               <div className="row-end">
-                <button type="button" className="ghost-button" onClick={resetSelfie}>
-                  Retake Selfie
+                <button type="button" className="ghost-button" onClick={stopCamera} disabled={verifying}>
+                  Cancel
                 </button>
-                <button type="button" className="success-button" onClick={handleCheckIn} disabled={loading}>
-                  {loading && action === "checkin" ? "Saving..." : "Yes, it's me - Check In"}
+                <button type="button" className="primary-button" onClick={captureSelfie} disabled={verifying}>
+                  Take Selfie
                 </button>
               </div>
             </div>
-          )}
+          ) : null}
+
+          {selfiePreview ? (
+            <div className="stack">
+              <div className={`attendance-verify-stage${verifying ? " is-verifying" : ""}`}>
+                <div className="comparison-grid">
+                  <div className="mini-card">
+                    <strong>Registered</strong>
+                    <img src={registeredPhotoUrl} alt="Registered photo" className="photo-preview comparison-photo" />
+                  </div>
+                  <div className="mini-card">
+                    <strong>Live Selfie</strong>
+                    <img src={selfiePreview} alt="Live selfie" className="photo-preview comparison-photo" />
+                  </div>
+                </div>
+                {verifying ? (
+                  <div className="attendance-verify-overlay">
+                    <div className="attendance-spinner" />
+                    <strong>AI is comparing faces...</strong>
+                  </div>
+                ) : null}
+              </div>
+
+              {verifyMessage ? (
+                <div className={`attendance-verify-message ${verifyTone || "pending"}`}>
+                  <strong>
+                    {faceVerified
+                      ? "Verification successful"
+                      : blocked
+                        ? "Verification blocked"
+                        : verifyTone === "error"
+                          ? "Face did not match"
+                          : "Verification status"}
+                  </strong>
+                  <p>{verifyMessage}</p>
+                  {verifyConfidence !== null && !faceVerified ? <p>Confidence: {verifyConfidence}%</p> : null}
+                  {attempts > 0 && !faceVerified ? <p>Attempt {attempts} of 3</p> : null}
+                </div>
+              ) : null}
+
+              {!blocked && !faceVerified ? (
+                <div className="row-end">
+                  <button type="button" className="ghost-button" onClick={() => setSelfiePreview("")} disabled={verifying}>
+                    Retake
+                  </button>
+                  <button type="button" className="primary-button" onClick={verifyFaces} disabled={verifying || loading}>
+                    Verify Face
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {blocked ? (
+            <div className="alert error">
+              Too many failed attempts. Please contact your HR or Admin.
+            </div>
+          ) : null}
 
           {attendanceState === "checked_in" ? (
             <div className="row-end">
               <button
                 type="button"
                 className="ghost-button"
-                onClick={handleCheckOut}
+                onClick={markCheckOut}
                 disabled={loading || !todayAttendance?.check_in_time}
               >
                 {loading && action === "checkout" ? "Checking out..." : "Check Out"}

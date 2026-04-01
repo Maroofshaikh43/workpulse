@@ -1169,6 +1169,78 @@ tr:last-child td {
   margin-top: 12px;
 }
 
+.attendance-model-loading {
+  min-height: 280px;
+  display: grid;
+  place-items: center;
+  gap: 12px;
+}
+
+.attendance-hidden-canvas {
+  display: none;
+}
+
+.attendance-spinner {
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  border: 3px solid rgba(99, 102, 241, 0.16);
+  border-top-color: #6366f1;
+  animation: attendanceSpin 0.8s linear infinite;
+}
+
+.attendance-state-card.success {
+  background: rgba(5, 150, 105, 0.06);
+  border-color: rgba(5, 150, 105, 0.2);
+}
+
+.attendance-verify-stage {
+  position: relative;
+}
+
+.attendance-verify-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.82);
+  text-align: center;
+}
+
+.attendance-verify-message {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px;
+}
+
+.attendance-verify-message.success {
+  background: rgba(5, 150, 105, 0.08);
+  border-color: rgba(5, 150, 105, 0.18);
+}
+
+.attendance-verify-message.error {
+  background: rgba(220, 38, 38, 0.08);
+  border-color: rgba(220, 38, 38, 0.18);
+}
+
+.attendance-verify-message.pending {
+  background: rgba(99, 102, 241, 0.08);
+  border-color: rgba(99, 102, 241, 0.18);
+}
+
+@keyframes attendanceSpin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .ai-assistant-shell {
   position: fixed;
   right: 24px;
