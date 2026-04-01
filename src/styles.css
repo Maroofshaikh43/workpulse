@@ -1231,6 +1231,29 @@ tr:last-child td {
   border-color: rgba(99, 102, 241, 0.18);
 }
 
+.report-entry-table input,
+.report-entry-table select,
+.report-entry-table textarea {
+  margin-top: 0;
+  min-width: 100px;
+}
+
+.report-entry-table textarea {
+  min-height: 72px;
+}
+
+.report-select-card {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  background: #ffffff;
+}
+
+.report-select-card.active {
+  border-color: rgba(99, 102, 241, 0.4);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
 @keyframes attendanceSpin {
   from {
     transform: rotate(0deg);
