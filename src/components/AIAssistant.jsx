@@ -1,11 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { askAI } from "../utils/ai";
-import { formatTime, getToday } from "../utils";
+import { formatDate, formatTime, getDateOffset, getToday } from "../utils";
 
-const quickSuggestions = [
+const employeeSuggestions = [
   "My attendance this month",
   "How many leaves do I have?",
   "Help me write a leave request",
+];
+
+const adminSuggestions = [
+  "Who is absent today?",
+  "Show pending leave requests",
+  "Review Rahul's attendance this month",
+  "Summarize today's company status",
 ];
 
 function createMessage(role, content) {
@@ -24,13 +31,26 @@ function formatMessageTimestamp(value) {
   });
 }
 
+function buildWelcomeMessage(role) {
+  if (role === "employee") {
+    return "Hi, I'm WorkPulse AI. I can help with your attendance, leave balance, leave requests, and HR questions.";
+  }
+
+  return "Hi, I'm WorkPulse AI. I can help with company attendance, employee status, leave reviews, reports, and employee-specific questions.";
+}
+
 async function loadEmployeeContext(supabase, profile) {
   const today = getToday();
   const firstDayOfMonth = `${today.slice(0, 8)}01`;
 
   const [leavesResponse, attendanceResponse] = await Promise.all([
-    supabase.from("leaves").select("days,status").eq("user_id", profile.id),
-    supabase.from("attendance").select("status,check_in_time,check_out_time").eq("user_id", profile.id).eq("date", today).maybeSingle(),
+    supabase.from("leaves").select("days,status,type,from_date,to_date,reason").eq("user_id", profile.id),
+    supabase
+      .from("attendance")
+      .select("status,check_in_time,check_out_time")
+      .eq("user_id", profile.id)
+      .eq("date", today)
+      .maybeSingle(),
   ]);
 
   if (leavesResponse.error) throw leavesResponse.error;
@@ -38,10 +58,11 @@ async function loadEmployeeContext(supabase, profile) {
 
   const monthAttendanceResponse = await supabase
     .from("attendance")
-    .select("date,status")
+    .select("date,status,check_in_time,check_out_time")
     .eq("user_id", profile.id)
     .gte("date", firstDayOfMonth)
-    .lte("date", today);
+    .lte("date", today)
+    .order("date", { ascending: false });
 
   if (monthAttendanceResponse.error) throw monthAttendanceResponse.error;
 
@@ -52,6 +73,7 @@ async function loadEmployeeContext(supabase, profile) {
 
   return {
     scope: "employee",
+    permissions: "Only answer for this employee's own data. Do not provide company-wide employee data.",
     name: profile.name,
     department: profile.department,
     role: profile.role,
@@ -68,32 +90,138 @@ async function loadEmployeeContext(supabase, profile) {
       late: (monthAttendanceResponse.data ?? []).filter((item) => item.status === "late").length,
       totalMarkedDays: (monthAttendanceResponse.data ?? []).length,
     },
+    recentLeaveRequests: leaves.slice(0, 5).map((item) => ({
+      type: item.type,
+      status: item.status,
+      fromDate: item.from_date,
+      toDate: item.to_date,
+      reason: item.reason,
+      days: item.days,
+    })),
   };
 }
 
 async function loadAdminContext(supabase, profile, company) {
   const today = getToday();
-  const [usersResponse, attendanceResponse, leavesResponse] = await Promise.all([
-    supabase.from("users").select("id").eq("company_id", profile.company_id).eq("is_active", true),
-    supabase.from("attendance").select("user_id,status").eq("company_id", profile.company_id).eq("date", today),
-    supabase.from("leaves").select("id").eq("company_id", profile.company_id).eq("status", "pending"),
+  const monthStart = `${today.slice(0, 8)}01`;
+  const weekStart = getDateOffset(-6);
+
+  const [usersResponse, attendanceResponse, monthAttendanceResponse, leavesResponse, reportsResponse] = await Promise.all([
+    supabase
+      .from("users")
+      .select("id,name,email,department,role,is_active,created_at")
+      .eq("company_id", profile.company_id)
+      .order("created_at", { ascending: false }),
+    supabase
+      .from("attendance")
+      .select("user_id,status,check_in_time,check_out_time,date")
+      .eq("company_id", profile.company_id)
+      .eq("date", today),
+    supabase
+      .from("attendance")
+      .select("user_id,status,check_in_time,check_out_time,date")
+      .eq("company_id", profile.company_id)
+      .gte("date", monthStart)
+      .lte("date", today),
+    supabase
+      .from("leaves")
+      .select("id,user_id,type,status,days,from_date,to_date,reason,created_at")
+      .eq("company_id", profile.company_id)
+      .order("created_at", { ascending: false }),
+    supabase
+      .from("daily_reports")
+      .select("user_id,date,hours,mood,tasks")
+      .eq("company_id", profile.company_id)
+      .gte("date", weekStart)
+      .order("date", { ascending: false }),
   ]);
 
   if (usersResponse.error) throw usersResponse.error;
   if (attendanceResponse.error) throw attendanceResponse.error;
+  if (monthAttendanceResponse.error) throw monthAttendanceResponse.error;
   if (leavesResponse.error) throw leavesResponse.error;
+  if (reportsResponse.error) throw reportsResponse.error;
 
   const employees = usersResponse.data ?? [];
   const todayAttendance = attendanceResponse.data ?? [];
+  const monthAttendance = monthAttendanceResponse.data ?? [];
+  const leaves = leavesResponse.data ?? [];
+  const reports = reportsResponse.data ?? [];
   const presentToday = todayAttendance.filter((item) => ["present", "late"].includes(item.status)).length;
+  const employeeMap = employees.reduce((accumulator, employee) => {
+    accumulator[employee.id] = employee;
+    return accumulator;
+  }, {});
+
+  const employeeSnapshots = employees.slice(0, 25).map((employee) => {
+    const todayRecord = todayAttendance.find((item) => item.user_id === employee.id);
+    const employeeMonthAttendance = monthAttendance.filter((item) => item.user_id === employee.id);
+    const employeeLeaves = leaves.filter((item) => item.user_id === employee.id);
+    const employeeReports = reports.filter((item) => item.user_id === employee.id);
+
+    return {
+      id: employee.id,
+      name: employee.name,
+      email: employee.email,
+      department: employee.department,
+      role: employee.role,
+      isActive: employee.is_active,
+      todayStatus: todayRecord?.status ?? "absent",
+      todayCheckIn: todayRecord?.check_in_time ? formatTime(todayRecord.check_in_time) : null,
+      todayCheckOut: todayRecord?.check_out_time ? formatTime(todayRecord.check_out_time) : null,
+      monthAttendance: {
+        present: employeeMonthAttendance.filter((item) => item.status === "present").length,
+        late: employeeMonthAttendance.filter((item) => item.status === "late").length,
+        markedDays: employeeMonthAttendance.length,
+      },
+      leaveSummary: {
+        pending: employeeLeaves.filter((item) => item.status === "pending").length,
+        approvedDays: employeeLeaves.filter((item) => item.status === "approved").reduce((sum, item) => sum + item.days, 0),
+      },
+      recentReports: employeeReports.slice(0, 3).map((item) => ({
+        date: formatDate(item.date),
+        hours: item.hours,
+        mood: item.mood,
+      })),
+    };
+  });
 
   return {
     scope: profile.role,
+    permissions: "Admin and HR can ask about company-level data and specific employees in this company.",
     companyName: company?.name ?? "WorkPulse",
-    totalEmployeesCount: employees.length,
+    totalEmployeesCount: employees.filter((employee) => employee.is_active).length,
     presentTodayCount: presentToday,
-    absentTodayCount: Math.max(0, employees.length - presentToday),
-    pendingLeavesCount: (leavesResponse.data ?? []).length,
+    absentTodayCount: Math.max(0, employees.filter((employee) => employee.is_active).length - presentToday),
+    pendingLeavesCount: leaves.filter((item) => item.status === "pending").length,
+    employees: employeeSnapshots,
+    pendingLeaves: leaves
+      .filter((item) => item.status === "pending")
+      .slice(0, 15)
+      .map((item) => ({
+        employeeName: employeeMap[item.user_id]?.name ?? item.user_id,
+        department: employeeMap[item.user_id]?.department ?? "",
+        type: item.type,
+        days: item.days,
+        fromDate: item.from_date,
+        toDate: item.to_date,
+        reason: item.reason,
+      })),
+    todayAttendanceBoard: todayAttendance.slice(0, 25).map((item) => ({
+      employeeName: employeeMap[item.user_id]?.name ?? item.user_id,
+      department: employeeMap[item.user_id]?.department ?? "",
+      status: item.status,
+      checkIn: item.check_in_time ? formatTime(item.check_in_time) : null,
+      checkOut: item.check_out_time ? formatTime(item.check_out_time) : null,
+    })),
+    recentDailyReports: reports.slice(0, 20).map((item) => ({
+      employeeName: employeeMap[item.user_id]?.name ?? item.user_id,
+      department: employeeMap[item.user_id]?.department ?? "",
+      date: item.date,
+      hours: item.hours,
+      mood: item.mood,
+      tasks: item.tasks,
+    })),
   };
 }
 
@@ -104,12 +232,16 @@ export default function AIAssistant({ supabase, profile, company }) {
   const [contextLoading, setContextLoading] = useState(false);
   const [contextError, setContextError] = useState("");
   const [aiContext, setAiContext] = useState(null);
-  const [messages, setMessages] = useState(() => [
-    createMessage("assistant", "Hi, I’m WorkPulse AI. Ask me about attendance, leave balance, reports, or HR help."),
-  ]);
+  const [messages, setMessages] = useState(() => [createMessage("assistant", buildWelcomeMessage(profile.role))]);
   const messagesRef = useRef(null);
 
+  const isEmployee = profile.role === "employee";
+  const quickSuggestions = isEmployee ? employeeSuggestions : adminSuggestions;
   const canChat = useMemo(() => !loading && !contextLoading, [contextLoading, loading]);
+
+  useEffect(() => {
+    setMessages([createMessage("assistant", buildWelcomeMessage(profile.role))]);
+  }, [profile.role]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -165,6 +297,7 @@ export default function AIAssistant({ supabase, profile, company }) {
 
     const reply = await askAI(trimmedPrompt, {
       companyStatus: company?.status ?? "unknown",
+      userRole: profile.role,
       ...aiContext,
     });
 
@@ -188,9 +321,14 @@ export default function AIAssistant({ supabase, profile, company }) {
           <header className="ai-assistant-header">
             <div>
               <strong>WorkPulse AI</strong>
-              <span>Powered by DeepSeek</span>
+              <span>{isEmployee ? "Employee Assistant" : "Admin Assistant"}</span>
             </div>
-            <button type="button" className="icon-button ai-assistant-close" aria-label="Close AI assistant" onClick={() => setIsOpen(false)}>
+            <button
+              type="button"
+              className="icon-button ai-assistant-close"
+              aria-label="Close AI assistant"
+              onClick={() => setIsOpen(false)}
+            >
               ×
             </button>
           </header>
@@ -233,7 +371,7 @@ export default function AIAssistant({ supabase, profile, company }) {
                 type="text"
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
-                placeholder="Ask WorkPulse AI..."
+                placeholder={isEmployee ? "Ask about your work data..." : "Ask about company or employee data..."}
                 disabled={!canChat}
               />
               <button type="submit" className="primary-button ai-send-button" disabled={!canChat || !input.trim()}>
