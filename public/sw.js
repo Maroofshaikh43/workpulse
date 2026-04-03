@@ -1,4 +1,4 @@
-const CACHE_NAME = "workpulse-cache-v1";
+const CACHE_NAME = "workpulse-cache-v2";
 const ASSETS = ["/", "/manifest.webmanifest", "/pwa-icon.svg"];
 
 self.addEventListener("install", (event) => {
@@ -15,16 +15,32 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
+  const requestUrl = new URL(event.request.url);
+  const isSameOrigin = requestUrl.origin === self.location.origin;
+
+  if (!isSameOrigin) {
+    return;
+  }
+
   event.respondWith(
     caches.match(event.request).then((cached) => {
       if (cached) return cached;
       return fetch(event.request)
         .then((response) => {
+          if (!response.ok || response.type !== "basic") {
+            return response;
+          }
+
           const clone = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
           return response;
         })
-        .catch(() => caches.match("/"));
+        .catch(() => {
+          if (event.request.mode === "navigate") {
+            return caches.match("/");
+          }
+          throw new Error("Network request failed");
+        });
     }),
   );
 });
