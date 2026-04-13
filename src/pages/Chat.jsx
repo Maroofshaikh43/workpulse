@@ -1,9 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { Icon } from "../brand";
-import { formatDate, formatTime } from "../utils";
+import { formatTime } from "../utils";
 
-const EMOJI_OPTIONS = ["👍", "❤️", "🔥", "😂", "👏", "🎉"];
+const DEFAULT_CHANNELS = [
+  { name: "general", description: "Company wide conversations" },
+  { name: "announcements", description: "Important updates" },
+  { name: "hr", description: "HR updates and policies" },
+  { name: "random", description: "Fun and casual" },
+];
+
+const EMOJI_OPTIONS = ["\u{1F44D}", "\u2764\uFE0F", "\u{1F602}", "\u{1F62E}", "\u{1F622}", "\u{1F389}"];
+const MESSAGE_GROUP_GAP_MS = 5 * 60 * 1000;
+const TYPING_THROTTLE_MS = 2000;
+const TYPING_VISIBLE_MS = 3000;
 
 function getInitials(name) {
   if (!name) return "U";
@@ -15,17 +25,17 @@ function getInitials(name) {
 }
 
 function getAvatarColor(seed = "") {
-  const palette = ["#f59e0b", "#10b981", "#3b82f6", "#6366f1", "#ef4444", "#0f766e"];
-  const value = seed.split("").reduce((sum, char) => sum + char.charCodeAt(0), 0);
-  return palette[value % palette.length];
+  const palette = ["#ef4444", "#f59e0b", "#10b981", "#3b82f6", "#6366f1", "#ec4899"];
+  const total = seed.split("").reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  return palette[total % palette.length];
 }
 
 function isImage(fileType = "", fileUrl = "") {
   return fileType.startsWith("image/") || /\.(png|jpe?g|gif|webp|svg)$/i.test(fileUrl);
 }
 
-function createDirectChannelName(userId, targetUserId) {
-  return `dm:${[userId, targetUserId].sort().join(":")}`;
+function createDirectChannelName(userId, otherUserId) {
+  return `dm-${[userId, otherUserId].sort().join("-")}`;
 }
 
 function escapeForRegex(value) {
@@ -46,18 +56,49 @@ function highlightContent(text, query) {
   );
 }
 
-function upsertRow(rows, nextRow) {
-  const filtered = rows.filter((item) => item.id !== nextRow.id);
-  return [...filtered, nextRow].sort((left, right) => new Date(left.created_at) - new Date(right.created_at));
+function formatDayDividerLabel(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+
+  const today = new Date();
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const startOfTarget = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const diffDays = Math.round((startOfToday.getTime() - startOfTarget.getTime()) / 86400000);
+
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
+
+  return date.toLocaleDateString(undefined, { month: "long", day: "numeric" });
 }
 
-function buildUnreadMap(messages, memberships, currentUserId) {
-  const lastReadMap = memberships.reduce((accumulator, membership) => {
+function isSameGroup(previousMessage, currentMessage) {
+  if (!previousMessage) return false;
+  const previousDate = new Date(previousMessage.created_at);
+  const currentDate = new Date(currentMessage.created_at);
+
+  return (
+    previousMessage.sender_id === currentMessage.sender_id &&
+    previousDate.toDateString() === currentDate.toDateString() &&
+    currentDate.getTime() - previousDate.getTime() < MESSAGE_GROUP_GAP_MS
+  );
+}
+
+function sortByCreatedAt(rows) {
+  return [...rows].sort((left, right) => new Date(left.created_at) - new Date(right.created_at));
+}
+
+function upsertById(rows, nextRow) {
+  const filtered = rows.filter((item) => item.id !== nextRow.id);
+  return sortByCreatedAt([...filtered, nextRow]);
+}
+
+function buildUnreadMap(messageRows, membershipRows, currentUserId) {
+  const lastReadMap = membershipRows.reduce((accumulator, membership) => {
     accumulator[membership.channel_id] = membership.last_read_at ? new Date(membership.last_read_at).getTime() : 0;
     return accumulator;
   }, {});
 
-  return messages.reduce((accumulator, message) => {
+  return messageRows.reduce((accumulator, message) => {
     const createdAt = message.created_at ? new Date(message.created_at).getTime() : 0;
     const lastReadAt = lastReadMap[message.channel_id] ?? 0;
     if (message.sender_id !== currentUserId && createdAt > lastReadAt) {
@@ -67,38 +108,63 @@ function buildUnreadMap(messages, memberships, currentUserId) {
   }, {});
 }
 
+function scrollToBottom(elementRef) {
+  window.requestAnimationFrame(() => {
+    if (!elementRef.current) return;
+    elementRef.current.scrollTop = elementRef.current.scrollHeight;
+  });
+}
+
 export default function Chat() {
   const { supabase, profile, refreshChatUnreadCount } = useOutletContext();
+  const canManageChannels = profile.role === "admin" || profile.role === "hr";
+
   const [employees, setEmployees] = useState([]);
   const [channels, setChannels] = useState([]);
   const [channelMembers, setChannelMembers] = useState([]);
   const [messages, setMessages] = useState([]);
   const [reactions, setReactions] = useState([]);
-  const [activeChannelId, setActiveChannelId] = useState("");
+  const [unreadByChannel, setUnreadByChannel] = useState({});
+  const [selectedChannelId, setSelectedChannelId] = useState("");
   const [threadMessageId, setThreadMessageId] = useState("");
-  const [channelQuery, setChannelQuery] = useState("");
-  const [messageQuery, setMessageQuery] = useState("");
+  const [channelSearch, setChannelSearch] = useState("");
+  const [messageSearch, setMessageSearch] = useState("");
   const [showMessageSearch, setShowMessageSearch] = useState(false);
-  const [composerValue, setComposerValue] = useState("");
-  const [threadComposerValue, setThreadComposerValue] = useState("");
+  const [messageText, setMessageText] = useState("");
+  const [threadMessageText, setThreadMessageText] = useState("");
   const [mainAttachment, setMainAttachment] = useState(null);
   const [threadAttachment, setThreadAttachment] = useState(null);
-  const [reactionTargetId, setReactionTargetId] = useState("");
+  const [loadingWorkspace, setLoadingWorkspace] = useState(true);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [hoveredMessageId, setHoveredMessageId] = useState("");
+  const [reactionPickerMessageId, setReactionPickerMessageId] = useState("");
   const [editingMessageId, setEditingMessageId] = useState("");
   const [editingValue, setEditingValue] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [onlineUsers, setOnlineUsers] = useState([]);
+  const [typingUsers, setTypingUsers] = useState([]);
+  const [showCreateChannelModal, setShowCreateChannelModal] = useState(false);
+  const [createChannelForm, setCreateChannelForm] = useState({
+    name: "",
+    description: "",
+    type: "public",
+    members: [],
+  });
   const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
-  const [onlineUsers, setOnlineUsers] = useState({});
-  const [presenceStatus, setPresenceStatus] = useState("online");
-  const [memberManagerChannelId, setMemberManagerChannelId] = useState("");
-  const [memberSelection, setMemberSelection] = useState([]);
-  const fileInputRef = useRef(null);
-  const threadFileInputRef = useRef(null);
-  const messageListRef = useRef(null);
+  const [notice, setNotice] = useState("");
 
-  const canManageChannels = profile.role === "admin" || profile.role === "hr";
+  const messageListRef = useRef(null);
+  const threadListRef = useRef(null);
+  const mainFileInputRef = useRef(null);
+  const threadFileInputRef = useRef(null);
+  const typingChannelRef = useRef(null);
+  const typingTimeoutsRef = useRef({});
+  const typingSentAtRef = useRef(0);
+  const activeChannelIdRef = useRef("");
+  const messagesRef = useRef([]);
+  const channelsRef = useRef([]);
+  const channelMembersRef = useRef([]);
+
   const employeesById = useMemo(
     () =>
       employees.reduce((accumulator, employee) => {
@@ -120,369 +186,486 @@ export default function Chat() {
     [channelMembers],
   );
 
-  const unreadByChannel = useMemo(
-    () => buildUnreadMap(messages, channelMembers.filter((item) => item.user_id === profile.id), profile.id),
-    [channelMembers, messages, profile.id],
-  );
-
   const channelsWithMeta = useMemo(
     () =>
       channels.map((channel) => {
         const members = membershipsByChannel[channel.id] ?? [];
-        const directPartner = channel.type === "direct"
-          ? members
-              .map((member) => employeesById[member.user_id])
-              .find((employee) => employee && employee.id !== profile.id)
-          : null;
+        const directPartner =
+          channel.type === "direct"
+            ? members
+                .map((member) => employeesById[member.user_id])
+                .find((employee) => employee && employee.id !== profile.id) ?? null
+            : null;
+
+        const displayName = channel.type === "direct" ? directPartner?.name ?? "Direct message" : channel.name;
+        const descriptionLabel =
+          channel.type === "direct"
+            ? directPartner?.department || directPartner?.email || "Direct message"
+            : channel.description || "No description yet.";
 
         return {
           ...channel,
-          memberCount: members.length,
           members,
-          displayName: channel.type === "direct" ? directPartner?.name ?? "Direct Message" : `# ${channel.name}`,
-          shortName: channel.type === "direct" ? directPartner?.name ?? "DM" : channel.name,
-          descriptionLabel:
-            channel.type === "direct"
-              ? directPartner?.department
-                ? `${directPartner.department} direct messages`
-                : "Direct messages"
-              : channel.description || "No channel description yet.",
+          memberCount: members.length,
           directPartner,
+          displayName,
+          descriptionLabel,
         };
       }),
     [channels, employeesById, membershipsByChannel, profile.id],
   );
 
-  const filteredPublicChannels = useMemo(
-    () =>
-      channelsWithMeta.filter(
-        (channel) =>
-          channel.type !== "direct" &&
-          `${channel.name} ${channel.description ?? ""}`.toLowerCase().includes(channelQuery.trim().toLowerCase()),
-      ),
-    [channelQuery, channelsWithMeta],
+  const selectedChannel = useMemo(
+    () => channelsWithMeta.find((channel) => channel.id === selectedChannelId) ?? null,
+    [channelsWithMeta, selectedChannelId],
   );
 
-  const filteredEmployees = useMemo(
-    () =>
-      employees.filter((employee) => {
-        if (employee.id === profile.id) return false;
-        const haystack = `${employee.name} ${employee.email} ${employee.department}`.toLowerCase();
-        return haystack.includes(channelQuery.trim().toLowerCase());
-      }),
-    [channelQuery, employees, profile.id],
+  const channelMembership = useMemo(
+    () => channelMembers.find((member) => member.channel_id === selectedChannelId && member.user_id === profile.id) ?? null,
+    [channelMembers, profile.id, selectedChannelId],
   );
 
-  const activeChannel = useMemo(
-    () => channelsWithMeta.find((channel) => channel.id === activeChannelId) ?? null,
-    [activeChannelId, channelsWithMeta],
+  const topLevelMessages = useMemo(
+    () => sortByCreatedAt(messages.filter((item) => !item.reply_to)),
+    [messages],
   );
 
-  const activeChannelMessages = useMemo(
-    () =>
-      messages
-        .filter((item) => item.channel_id === activeChannelId)
-        .sort((left, right) => new Date(left.created_at) - new Date(right.created_at)),
-    [activeChannelId, messages],
-  );
-
-  const topLevelMessages = useMemo(() => activeChannelMessages.filter((item) => !item.reply_to), [activeChannelMessages]);
   const threadParent = useMemo(
-    () => activeChannelMessages.find((item) => item.id === threadMessageId) ?? null,
-    [activeChannelMessages, threadMessageId],
+    () => messages.find((item) => item.id === threadMessageId) ?? null,
+    [messages, threadMessageId],
   );
+
   const threadReplies = useMemo(
-    () =>
-      activeChannelMessages
-        .filter((item) => item.reply_to === threadMessageId)
-        .sort((left, right) => new Date(left.created_at) - new Date(right.created_at)),
-    [activeChannelMessages, threadMessageId],
+    () => sortByCreatedAt(messages.filter((item) => item.reply_to === threadMessageId)),
+    [messages, threadMessageId],
   );
 
   const visibleMessages = useMemo(() => {
-    if (!messageQuery.trim()) return topLevelMessages;
-    const query = messageQuery.trim().toLowerCase();
-    return topLevelMessages.filter((item) => {
-      const ownMatch = (item.content ?? "").toLowerCase().includes(query);
-      const replyMatch = activeChannelMessages.some(
-        (reply) => reply.reply_to === item.id && (reply.content ?? "").toLowerCase().includes(query),
+    if (!messageSearch.trim()) return topLevelMessages;
+
+    const query = messageSearch.trim().toLowerCase();
+    return topLevelMessages.filter((messageRow) => {
+      const senderName = messageRow.sender?.name ?? employeesById[messageRow.sender_id]?.name ?? "";
+      const contentMatches = (messageRow.content ?? "").toLowerCase().includes(query);
+      const senderMatches = senderName.toLowerCase().includes(query);
+      const replyMatches = messages.some(
+        (reply) =>
+          reply.reply_to === messageRow.id &&
+          (((reply.content ?? "").toLowerCase().includes(query)) ||
+            ((reply.sender?.name ?? employeesById[reply.sender_id]?.name ?? "").toLowerCase().includes(query))),
       );
-      return ownMatch || replyMatch;
+
+      return contentMatches || senderMatches || replyMatches;
     });
-  }, [activeChannelMessages, messageQuery, topLevelMessages]);
+  }, [employeesById, messageSearch, messages, topLevelMessages]);
 
   const firstUnreadMessageId = useMemo(() => {
-    const membership = channelMembers.find((item) => item.channel_id === activeChannelId && item.user_id === profile.id);
-    const lastReadAt = membership?.last_read_at ? new Date(membership.last_read_at).getTime() : 0;
+    const lastReadAt = channelMembership?.last_read_at ? new Date(channelMembership.last_read_at).getTime() : 0;
     return visibleMessages.find(
-      (item) => item.sender_id !== profile.id && new Date(item.created_at).getTime() > lastReadAt,
+      (messageRow) => messageRow.sender_id !== profile.id && new Date(messageRow.created_at).getTime() > lastReadAt,
     )?.id;
-  }, [activeChannelId, channelMembers, profile.id, visibleMessages]);
+  }, [channelMembership?.last_read_at, profile.id, visibleMessages]);
 
-  const loadWorkspace = async ({ keepSelection = true } = {}) => {
-    setLoading(true);
-    setError("");
+  const reactionMap = useMemo(
+    () =>
+      reactions.reduce((accumulator, reaction) => {
+        if (!accumulator[reaction.message_id]) {
+          accumulator[reaction.message_id] = [];
+        }
+        accumulator[reaction.message_id].push(reaction);
+        return accumulator;
+      }, {}),
+    [reactions],
+  );
 
-    const [employeesResponse, channelsResponse, membersResponse, messagesResponse] = await Promise.all([
-      supabase.from("users").select("id, name, email, department, role, profile_photo_url, is_active").eq("company_id", profile.company_id).order("name"),
-      supabase.from("channels").select("*").eq("company_id", profile.company_id).order("created_at"),
-      supabase.from("channel_members").select("*").order("created_at"),
-      supabase.from("messages").select("*").eq("company_id", profile.company_id).order("created_at"),
-    ]);
+  const filteredChannels = useMemo(() => {
+    const query = channelSearch.trim().toLowerCase();
+    return channelsWithMeta.filter((channel) => {
+      if (channel.type === "direct") return false;
+      if (!query) return true;
+      return `${channel.name} ${channel.description ?? ""}`.toLowerCase().includes(query);
+    });
+  }, [channelSearch, channelsWithMeta]);
 
-    if (employeesResponse.error || channelsResponse.error || membersResponse.error || messagesResponse.error) {
-      setError(
-        employeesResponse.error?.message ||
-          channelsResponse.error?.message ||
-          membersResponse.error?.message ||
-          messagesResponse.error?.message ||
-          "Unable to load chat workspace.",
-      );
-      setLoading(false);
+  const filteredEmployees = useMemo(() => {
+    const query = channelSearch.trim().toLowerCase();
+    return employees.filter((employee) => {
+      if (employee.id === profile.id) return false;
+      if (!query) return true;
+      return `${employee.name} ${employee.email} ${employee.department ?? ""}`.toLowerCase().includes(query);
+    });
+  }, [channelSearch, employees, profile.id]);
+
+  const fetchEmployees = async () => {
+    const { data, error: fetchError } = await supabase
+      .from("users")
+      .select("id, name, email, department, role, profile_photo_url")
+      .eq("company_id", profile.company_id)
+      .order("name");
+
+    if (fetchError) {
+      setError(fetchError.message);
+      return [];
+    }
+
+    const employeeRows = data ?? [];
+    setEmployees(employeeRows);
+    return employeeRows;
+  };
+
+  const fetchUnreadCounts = async (channelRows, membershipRows) => {
+    const channelIds = channelRows.map((channel) => channel.id);
+    if (!channelIds.length) {
+      setUnreadByChannel({});
+      refreshChatUnreadCount?.();
       return;
     }
 
-    const messageIds = (messagesResponse.data ?? []).map((item) => item.id);
-    let reactionRows = [];
-    if (messageIds.length) {
-      const reactionsResponse = await supabase
-        .from("message_reactions")
-        .select("*")
-        .in("message_id", messageIds)
-        .order("created_at");
+    const { data, error: fetchError } = await supabase
+      .from("messages")
+      .select("channel_id, created_at, sender_id")
+      .in("channel_id", channelIds)
+      .order("created_at", { ascending: false });
 
-      if (reactionsResponse.error) {
-        setError(reactionsResponse.error.message);
-      } else {
-        reactionRows = reactionsResponse.data ?? [];
-      }
+    if (fetchError) {
+      setError(fetchError.message);
+      return;
     }
 
-    const nextEmployees = employeesResponse.data ?? [];
-    const nextChannels = channelsResponse.data ?? [];
-    const nextMembers = membersResponse.data ?? [];
-    const nextMessages = messagesResponse.data ?? [];
-
-    setEmployees(nextEmployees);
-    setChannels(nextChannels);
-    setChannelMembers(nextMembers);
-    setMessages(nextMessages);
-    setReactions(reactionRows);
-
-    if (!keepSelection || !nextChannels.some((channel) => channel.id === activeChannelId)) {
-      const fallbackChannel =
-        nextChannels.find((channel) => channel.type === "public" && channel.name === "general") ?? nextChannels[0] ?? null;
-      setActiveChannelId(fallbackChannel?.id ?? "");
-    }
-
-    setLoading(false);
+    setUnreadByChannel(
+      buildUnreadMap((data ?? []), membershipRows.filter((membership) => membership.user_id === profile.id), profile.id),
+    );
     refreshChatUnreadCount?.();
   };
 
-  const loadReactionsForActiveChannel = async (channelId) => {
-    const messageIds = messages.filter((item) => item.channel_id === channelId).map((item) => item.id);
-    if (!messageIds.length) return;
+  const fetchChannelMembers = async (channelRows) => {
+    const channelIds = channelRows.map((channel) => channel.id);
+    if (!channelIds.length) {
+      setChannelMembers([]);
+      return [];
+    }
 
-    const { data, error: reactionsError } = await supabase
-      .from("message_reactions")
-      .select("*")
-      .in("message_id", messageIds)
+    const { data, error: fetchError } = await supabase
+      .from("channel_members")
+      .select("id, channel_id, user_id, last_read_at, created_at")
+      .in("channel_id", channelIds)
       .order("created_at");
 
-    if (!reactionsError) {
-      setReactions((current) => {
-        const otherReactions = current.filter((item) => !messageIds.includes(item.message_id));
-        return [...otherReactions, ...(data ?? [])];
-      });
+    if (fetchError) {
+      setError(fetchError.message);
+      return [];
     }
+
+    const memberRows = data ?? [];
+    setChannelMembers(memberRows);
+    return memberRows;
+  };
+
+  const createDefaultChannels = async () => {
+    const { data: employeeRows, error: employeeError } = await supabase
+      .from("users")
+      .select("id")
+      .eq("company_id", profile.company_id);
+
+    if (employeeError) {
+      setError(employeeError.message);
+      return;
+    }
+
+    for (const channel of DEFAULT_CHANNELS) {
+      const { data: createdChannel, error: createError } = await supabase
+        .from("channels")
+        .insert({
+          company_id: profile.company_id,
+          name: channel.name,
+          description: channel.description,
+          type: "public",
+          created_by: profile.id,
+        })
+        .select("*")
+        .single();
+
+      if (createError) {
+        const duplicate = createError.code === "23505" || /duplicate/i.test(createError.message ?? "");
+        if (!duplicate) {
+          setError(createError.message);
+          return;
+        }
+        continue;
+      }
+
+      if (createdChannel && (employeeRows ?? []).length) {
+        const { error: memberError } = await supabase.from("channel_members").insert(
+          employeeRows.map((employee) => ({
+            channel_id: createdChannel.id,
+            user_id: employee.id,
+          })),
+        );
+
+        if (memberError && memberError.code !== "23505") {
+          setError(memberError.message);
+          return;
+        }
+      }
+    }
+  };
+
+  const fetchChannels = async ({ keepSelection = true } = {}) => {
+    setLoadingWorkspace(true);
+    setError("");
+
+    const { data, error: fetchError } = await supabase
+      .from("channels")
+      .select("*, channel_members!inner(user_id)")
+      .eq("company_id", profile.company_id)
+      .eq("channel_members.user_id", profile.id)
+      .order("name");
+
+    if (fetchError) {
+      setError(fetchError.message);
+      setLoadingWorkspace(false);
+      return [];
+    }
+
+    let channelRows = data ?? [];
+    if (!channelRows.length) {
+      await createDefaultChannels();
+
+      const retry = await supabase
+        .from("channels")
+        .select("*, channel_members!inner(user_id)")
+        .eq("company_id", profile.company_id)
+        .eq("channel_members.user_id", profile.id)
+        .order("name");
+
+      if (retry.error) {
+        setError(retry.error.message);
+        setLoadingWorkspace(false);
+        return [];
+      }
+
+      channelRows = retry.data ?? [];
+    }
+
+    const cleanedChannels = channelRows.map(({ channel_members: ignored, ...channel }) => channel);
+    setChannels(cleanedChannels);
+
+    const membershipRows = await fetchChannelMembers(cleanedChannels);
+    await fetchUnreadCounts(cleanedChannels, membershipRows);
+
+    if (!keepSelection || !cleanedChannels.some((channel) => channel.id === activeChannelIdRef.current)) {
+      const defaultChannel =
+        cleanedChannels.find((channel) => channel.name === "general") ??
+        cleanedChannels.find((channel) => channel.type !== "direct") ??
+        cleanedChannels[0] ??
+        null;
+      setSelectedChannelId(defaultChannel?.id ?? "");
+    }
+
+    setLoadingWorkspace(false);
+    return cleanedChannels;
+  };
+
+  const fetchReactions = async (channelId, messageRows = null) => {
+    const sourceRows = messageRows ?? messages;
+    const ids = sourceRows.filter((item) => item.channel_id === channelId).map((item) => item.id);
+
+    if (!ids.length) {
+      setReactions([]);
+      return;
+    }
+
+    const { data, error: fetchError } = await supabase
+      .from("message_reactions")
+      .select("id, message_id, user_id, emoji, created_at")
+      .in("message_id", ids)
+      .order("created_at");
+
+    if (fetchError) {
+      setError(fetchError.message);
+      return;
+    }
+
+    setReactions(data ?? []);
+  };
+
+  const fetchMessageById = async (messageId) => {
+    const { data, error: fetchError } = await supabase
+      .from("messages")
+      .select(
+        "id, channel_id, company_id, sender_id, content, file_url, file_type, reply_to, edited_at, created_at, sender:users!messages_sender_id_fkey(id, name, department, profile_photo_url)",
+      )
+      .eq("id", messageId)
+      .single();
+
+    if (fetchError) {
+      setError(fetchError.message);
+      return null;
+    }
+
+    return data;
+  };
+
+  const fetchMessages = async (channelId) => {
+    if (!channelId) {
+      setMessages([]);
+      setReactions([]);
+      return;
+    }
+
+    setLoadingMessages(true);
+    const { data, error: fetchError } = await supabase
+      .from("messages")
+      .select(
+        "id, channel_id, company_id, sender_id, content, file_url, file_type, reply_to, edited_at, created_at, sender:users!messages_sender_id_fkey(id, name, department, profile_photo_url)",
+      )
+      .eq("channel_id", channelId)
+      .order("created_at", { ascending: true });
+
+    if (fetchError) {
+      setError(fetchError.message);
+      setLoadingMessages(false);
+      return;
+    }
+
+    const nextMessages = data ?? [];
+    setMessages(nextMessages);
+    await fetchReactions(channelId, nextMessages);
+    setLoadingMessages(false);
+    scrollToBottom(messageListRef);
   };
 
   const markChannelRead = async (channelId) => {
     if (!channelId) return;
+
     const timestamp = new Date().toISOString();
-    const { error: upsertError } = await supabase.from("channel_members").upsert(
-      {
-        channel_id: channelId,
-        user_id: profile.id,
-        last_read_at: timestamp,
-      },
-      { onConflict: "channel_id,user_id" },
+    const { error: updateError } = await supabase
+      .from("channel_members")
+      .update({ last_read_at: timestamp })
+      .eq("channel_id", channelId)
+      .eq("user_id", profile.id);
+
+    if (updateError) {
+      setError(updateError.message);
+      return;
+    }
+
+    setChannelMembers((current) =>
+      current.map((membership) =>
+        membership.channel_id === channelId && membership.user_id === profile.id
+          ? { ...membership, last_read_at: timestamp }
+          : membership,
+      ),
     );
 
-    if (!upsertError) {
-      setChannelMembers((current) => {
-        const existing = current.find((item) => item.channel_id === channelId && item.user_id === profile.id);
-        if (existing) {
-          return current.map((item) =>
-            item.channel_id === channelId && item.user_id === profile.id ? { ...item, last_read_at: timestamp } : item,
-          );
-        }
-        return [
-          ...current,
-          {
-            id: `${channelId}-${profile.id}`,
-            channel_id: channelId,
-            user_id: profile.id,
-            last_read_at: timestamp,
-            created_at: timestamp,
-          },
-        ];
-      });
-      refreshChatUnreadCount?.();
-    }
+    setUnreadByChannel((current) => ({ ...current, [channelId]: 0 }));
+    refreshChatUnreadCount?.();
   };
 
   const uploadAttachment = async (file) => {
     if (!file) return { fileUrl: null, fileType: null };
-    const filePath = `${profile.company_id}/${profile.id}/${Date.now()}-${file.name.replace(/\s+/g, "-")}`;
+
+    const sanitizedName = file.name.replace(/\s+/g, "-");
+    const filePath = `${profile.company_id}/${selectedChannelId}/${profile.id}/${Date.now()}-${sanitizedName}`;
     const { error: uploadError } = await supabase.storage.from("chat-files").upload(filePath, file, {
       cacheControl: "3600",
       upsert: false,
     });
 
     if (uploadError) throw uploadError;
+
     const { data } = supabase.storage.from("chat-files").getPublicUrl(filePath);
-    return { fileUrl: data.publicUrl, fileType: file.type || null };
+    return {
+      fileUrl: data.publicUrl,
+      fileType: file.type || null,
+    };
   };
 
-  const sendMessage = async ({ content, attachment, replyTo = null, reset }) => {
-    if (!activeChannel) return;
-    const trimmedContent = content.trim();
-    if (!trimmedContent && !attachment?.file) return;
+  const sendMessage = async ({ text, attachment, replyTo = null, onReset }) => {
+    if (!selectedChannel) return;
 
-    setSaving(true);
+    const trimmedText = text.trim();
+    if (!trimmedText && !attachment?.file) return;
+
+    setSending(true);
     setError("");
+
+    if (onReset) onReset();
 
     try {
       const upload = await uploadAttachment(attachment?.file ?? null);
       const { error: insertError } = await supabase.from("messages").insert({
-        channel_id: activeChannel.id,
+        channel_id: selectedChannel.id,
         company_id: profile.company_id,
         sender_id: profile.id,
-        content: trimmedContent || null,
+        content: trimmedText || null,
         file_url: upload.fileUrl,
         file_type: upload.fileType,
         reply_to: replyTo,
       });
 
       if (insertError) throw insertError;
-      reset();
-      setMessage("");
-      await markChannelRead(activeChannel.id);
+      await markChannelRead(selectedChannel.id);
     } catch (sendError) {
       setError(sendError.message);
+      if (replyTo) {
+        setThreadMessageText(text);
+        setThreadAttachment(attachment ?? null);
+      } else {
+        setMessageText(text);
+        setMainAttachment(attachment ?? null);
+      }
     } finally {
-      setSaving(false);
+      setSending(false);
     }
   };
 
-  const toggleReaction = async (messageId, emoji) => {
-    const existingReaction = reactions.find(
-      (item) => item.message_id === messageId && item.user_id === profile.id && item.emoji === emoji,
+  const addReaction = async (messageId, emoji) => {
+    const existing = reactions.find(
+      (reaction) => reaction.message_id === messageId && reaction.user_id === profile.id && reaction.emoji === emoji,
     );
-    if (existingReaction) {
-      await supabase.from("message_reactions").delete().eq("id", existingReaction.id);
+
+    if (existing) {
+      const { error: deleteError } = await supabase.from("message_reactions").delete().eq("id", existing.id);
+      if (deleteError) {
+        setError(deleteError.message);
+        return;
+      }
     } else {
-      await supabase.from("message_reactions").insert({
+      const { error: insertError } = await supabase.from("message_reactions").insert({
         message_id: messageId,
         user_id: profile.id,
         emoji,
       });
-    }
-    setReactionTargetId("");
-  };
-
-  const handleEditSave = async (messageId) => {
-    const nextValue = editingValue.trim();
-    if (!nextValue) return;
-    const { error: updateError } = await supabase
-      .from("messages")
-      .update({ content: nextValue, edited_at: new Date().toISOString() })
-      .eq("id", messageId);
-    if (updateError) {
-      setError(updateError.message);
-      return;
-    }
-    setEditingMessageId("");
-    setEditingValue("");
-  };
-
-  const handleDeleteMessage = async (messageId) => {
-    const confirmed = window.confirm("Delete this message?");
-    if (!confirmed) return;
-    const { error: deleteError } = await supabase.from("messages").delete().eq("id", messageId);
-    if (deleteError) setError(deleteError.message);
-  };
-
-  const handlePinToggle = async (chatMessage) => {
-    const { error: updateError } = await supabase
-      .from("messages")
-      .update({ is_pinned: !chatMessage.is_pinned })
-      .eq("id", chatMessage.id);
-    if (updateError) setError(updateError.message);
-  };
-
-  const createChannel = async () => {
-    if (!canManageChannels) return;
-    const name = window.prompt("Channel name");
-    if (!name?.trim()) return;
-    const type = window.prompt("Type: public or private", "public")?.trim().toLowerCase() || "public";
-    if (!["public", "private"].includes(type)) {
-      setError("Choose either public or private.");
-      return;
-    }
-    const description = window.prompt("Description", "") ?? "";
-    const { data, error: insertError } = await supabase
-      .from("channels")
-      .insert({
-        company_id: profile.company_id,
-        name: name.trim().toLowerCase().replace(/\s+/g, "-"),
-        description: description.trim() || null,
-        type,
-        created_by: profile.id,
-      })
-      .select("*")
-      .single();
-
-    if (insertError) {
-      setError(insertError.message);
-      return;
-    }
-
-    if (type === "public") {
-      const members = employees.map((employee) => ({ channel_id: data.id, user_id: employee.id }));
-      if (members.length) {
-        await supabase.from("channel_members").upsert(members, { onConflict: "channel_id,user_id" });
+      if (insertError) {
+        setError(insertError.message);
+        return;
       }
-    } else {
-      await supabase.from("channel_members").upsert(
-        [{ channel_id: data.id, user_id: profile.id }],
-        { onConflict: "channel_id,user_id" },
-      );
     }
 
-    setMessage("Channel created.");
-    await loadWorkspace({ keepSelection: false });
-    setActiveChannelId(data.id);
-    if (type === "private") {
-      openMemberManager(data.id);
-    }
+    setReactionPickerMessageId("");
+    await fetchReactions(selectedChannelId);
   };
 
-  const openDirectMessage = async (employee) => {
-    const directName = createDirectChannelName(profile.id, employee.id);
-    const existing = channels.find((channel) => channel.type === "direct" && channel.name === directName);
+  const openDM = async (otherUser) => {
+    const directName = createDirectChannelName(profile.id, otherUser.id);
+    const existing = channels.find(
+      (channel) =>
+        channel.type === "direct" &&
+        (channel.name === directName ||
+          (channel.name.includes(profile.id) && channel.name.includes(otherUser.id))),
+    );
+
     if (existing) {
-      setActiveChannelId(existing.id);
+      setSelectedChannelId(existing.id);
       return;
     }
 
-    const { data: channelRow, error: channelError } = await supabase
+    const { data: newDM, error: channelError } = await supabase
       .from("channels")
       .insert({
         company_id: profile.company_id,
         name: directName,
-        description: `Direct conversation between ${profile.name} and ${employee.name}`,
         type: "direct",
         created_by: profile.id,
       })
@@ -494,111 +677,450 @@ export default function Chat() {
       return;
     }
 
-    const { error: membershipError } = await supabase.from("channel_members").upsert(
-      [
-        { channel_id: channelRow.id, user_id: profile.id },
-        { channel_id: channelRow.id, user_id: employee.id },
-      ],
-      { onConflict: "channel_id,user_id" },
-    );
+    const { error: memberError } = await supabase.from("channel_members").insert([
+      { channel_id: newDM.id, user_id: profile.id },
+      { channel_id: newDM.id, user_id: otherUser.id },
+    ]);
 
-    if (membershipError) {
-      setError(membershipError.message);
+    if (memberError) {
+      setError(memberError.message);
       return;
     }
 
-    await loadWorkspace({ keepSelection: false });
-    setActiveChannelId(channelRow.id);
+    await fetchChannels({ keepSelection: false });
+    setSelectedChannelId(newDM.id);
   };
 
-  const openMemberManager = (channelId) => {
-    const existingMembers = (membershipsByChannel[channelId] ?? []).map((item) => item.user_id);
-    setMemberSelection(existingMembers);
-    setMemberManagerChannelId(channelId);
+  const createChannel = async () => {
+    if (!canManageChannels) return;
+
+    const name = createChannelForm.name.trim().toLowerCase().replace(/\s+/g, "-");
+    if (!name) {
+      setError("Channel name is required.");
+      return;
+    }
+
+    const { data: channelRow, error: channelError } = await supabase
+      .from("channels")
+      .insert({
+        company_id: profile.company_id,
+        name,
+        description: createChannelForm.description.trim() || null,
+        type: createChannelForm.type,
+        created_by: profile.id,
+      })
+      .select("*")
+      .single();
+
+    if (channelError) {
+      setError(channelError.message);
+      return;
+    }
+
+    const memberIds =
+      createChannelForm.type === "public"
+        ? employees.map((employee) => employee.id)
+        : Array.from(new Set([profile.id, ...createChannelForm.members]));
+
+    if (memberIds.length) {
+      const { error: memberError } = await supabase.from("channel_members").insert(
+        memberIds.map((userId) => ({
+          channel_id: channelRow.id,
+          user_id: userId,
+        })),
+      );
+
+      if (memberError && memberError.code !== "23505") {
+        setError(memberError.message);
+        return;
+      }
+    }
+
+    setShowCreateChannelModal(false);
+    setCreateChannelForm({ name: "", description: "", type: "public", members: [] });
+    setNotice("Channel created.");
+    await fetchChannels({ keepSelection: false });
+    setSelectedChannelId(channelRow.id);
   };
 
-  const saveMemberSelection = async () => {
-    const currentMembers = membershipsByChannel[memberManagerChannelId] ?? [];
-    const currentIds = currentMembers.map((item) => item.user_id);
-    const selectedIds = Array.from(new Set(memberSelection));
-    const toInsert = selectedIds
-      .filter((userId) => !currentIds.includes(userId))
-      .map((userId) => ({ channel_id: memberManagerChannelId, user_id: userId }));
-    const toDelete = currentMembers.filter((item) => !selectedIds.includes(item.user_id));
+  const saveEditedMessage = async (messageId) => {
+    const nextValue = editingValue.trim();
+    if (!nextValue) {
+      setError("Message text cannot be empty.");
+      return;
+    }
 
-    if (toInsert.length) {
-      const { error: insertError } = await supabase.from("channel_members").upsert(toInsert, {
-        onConflict: "channel_id,user_id",
+    const { error: updateError } = await supabase
+      .from("messages")
+      .update({ content: nextValue, edited_at: new Date().toISOString() })
+      .eq("id", messageId);
+
+    if (updateError) {
+      setError(updateError.message);
+      return;
+    }
+
+    setEditingMessageId("");
+    setEditingValue("");
+  };
+
+  const deleteMessage = async (messageId) => {
+    if (!window.confirm("Delete this message?")) return;
+
+    const { error: deleteError } = await supabase.from("messages").delete().eq("id", messageId);
+    if (deleteError) {
+      setError(deleteError.message);
+    }
+  };
+
+  const handleTyping = async () => {
+    if (!typingChannelRef.current || !selectedChannelId) return;
+
+    const now = Date.now();
+    if (now - typingSentAtRef.current < TYPING_THROTTLE_MS) return;
+    typingSentAtRef.current = now;
+
+    await typingChannelRef.current.send({
+      type: "broadcast",
+      event: "typing",
+      payload: {
+        user_id: profile.id,
+        user_name: profile.name,
+      },
+    });
+  };
+
+  const handleMainComposerChange = async (event) => {
+    setMessageText(event.target.value);
+    await handleTyping();
+  };
+
+  const handleThreadComposerChange = async (event) => {
+    setThreadMessageText(event.target.value);
+    await handleTyping();
+  };
+
+  const handleMessageKeyDown = async (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      await sendMessage({
+        text: messageText,
+        attachment: mainAttachment,
+        onReset: () => {
+          setMessageText("");
+          setMainAttachment(null);
+        },
       });
-      if (insertError) {
-        setError(insertError.message);
-        return;
-      }
+    }
+  };
+
+  const handleThreadKeyDown = async (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      await sendMessage({
+        text: threadMessageText,
+        attachment: threadAttachment,
+        replyTo: threadMessageId,
+        onReset: () => {
+          setThreadMessageText("");
+          setThreadAttachment(null);
+        },
+      });
+    }
+  };
+
+  const renderAttachment = (messageRow) => {
+    if (!messageRow.file_url) return null;
+
+    if (isImage(messageRow.file_type ?? "", messageRow.file_url)) {
+      return (
+        <a href={messageRow.file_url} target="_blank" rel="noreferrer" className="chat-image-link">
+          <img src={messageRow.file_url} alt="Chat attachment" className="chat-image-preview" />
+        </a>
+      );
     }
 
-    for (const member of toDelete) {
-      const { error: deleteError } = await supabase
-        .from("channel_members")
-        .delete()
-        .eq("channel_id", member.channel_id)
-        .eq("user_id", member.user_id);
-      if (deleteError) {
-        setError(deleteError.message);
-        return;
-      }
-    }
+    const filename = messageRow.file_url.split("/").pop()?.split("?")[0] ?? "Download file";
+    return (
+      <a href={messageRow.file_url} target="_blank" rel="noreferrer" className="chat-file-card">
+        <span className="chat-file-icon">FILE</span>
+        <span className="chat-file-copy">
+          <strong>{filename}</strong>
+          <small>{messageRow.file_type || "Attachment"}</small>
+        </span>
+      </a>
+    );
+  };
 
-    setMemberManagerChannelId("");
-    setMessage("Channel members updated.");
-    await loadWorkspace();
+  const renderReactionRow = (messageId) => {
+    const grouped = (reactionMap[messageId] ?? []).reduce((accumulator, reaction) => {
+      accumulator[reaction.emoji] = accumulator[reaction.emoji] ?? [];
+      accumulator[reaction.emoji].push(reaction);
+      return accumulator;
+    }, {});
+
+    const entries = Object.entries(grouped);
+    if (!entries.length) return null;
+
+    return (
+      <div className="chat-reaction-row">
+        {entries.map(([emoji, items]) => (
+          <button
+            key={`${messageId}-${emoji}`}
+            type="button"
+            className={`chat-reaction-chip${items.some((item) => item.user_id === profile.id) ? " active" : ""}`}
+            onClick={() => addReaction(messageId, emoji)}
+          >
+            <span>{emoji}</span>
+            <span>{items.length}</span>
+          </button>
+        ))}
+      </div>
+    );
+  };
+
+  const renderMessage = (messageRow, previousMessage, query, inThread = false) => {
+    const sender = messageRow.sender ?? employeesById[messageRow.sender_id];
+    const grouped = isSameGroup(previousMessage, messageRow);
+    const canEdit = messageRow.sender_id === profile.id;
+    const canDelete = canEdit || canManageChannels;
+    const replyCount = messages.filter((item) => item.reply_to === messageRow.id).length;
+
+    return (
+      <article
+        key={messageRow.id}
+        className={`chat-message${grouped ? " grouped" : ""}`}
+        onMouseEnter={() => setHoveredMessageId(messageRow.id)}
+        onMouseLeave={() => {
+          setHoveredMessageId((current) => (current === messageRow.id ? "" : current));
+          setReactionPickerMessageId((current) => (current === messageRow.id ? "" : current));
+        }}
+      >
+        {!grouped ? (
+          <div
+            className="chat-avatar"
+            style={{
+              background: `${getAvatarColor(sender?.name ?? messageRow.sender_id)}20`,
+              color: getAvatarColor(sender?.name ?? messageRow.sender_id),
+            }}
+          >
+            {getInitials(sender?.name)}
+          </div>
+        ) : (
+          <div className="chat-avatar chat-avatar-spacer" />
+        )}
+
+        <div className="chat-message-body">
+          {!grouped ? (
+            <div className="chat-message-head">
+              <div className="chat-message-author">
+                <strong>{sender?.name ?? "Unknown user"}</strong>
+                {sender?.department ? <span>{sender.department}</span> : null}
+              </div>
+              <time>{formatTime(messageRow.created_at)}</time>
+            </div>
+          ) : (
+            <div className="chat-message-head compact">
+              <time>{formatTime(messageRow.created_at)}</time>
+            </div>
+          )}
+
+          {editingMessageId === messageRow.id ? (
+            <div className="chat-edit-box">
+              <textarea value={editingValue} onChange={(event) => setEditingValue(event.target.value)} />
+              <div className="chat-inline-actions">
+                <button type="button" className="ghost-button" onClick={() => setEditingMessageId("")}>
+                  Cancel
+                </button>
+                <button type="button" className="primary-button" onClick={() => saveEditedMessage(messageRow.id)}>
+                  Save
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              {messageRow.content ? <div className="chat-message-text">{highlightContent(messageRow.content, query)}</div> : null}
+              {renderAttachment(messageRow)}
+              {messageRow.edited_at ? <span className="chat-edited-label">edited</span> : null}
+            </>
+          )}
+
+          {renderReactionRow(messageRow.id)}
+
+          {!inThread && replyCount > 0 ? (
+            <button type="button" className="chat-thread-link" onClick={() => setThreadMessageId(messageRow.id)}>
+              {replyCount} {replyCount === 1 ? "reply" : "replies"}
+            </button>
+          ) : null}
+
+          {hoveredMessageId === messageRow.id ? (
+            <div className="chat-action-bar">
+              <button type="button" className="chat-action-button" onClick={() => setReactionPickerMessageId(messageRow.id)}>
+                {"\u{1F44D}"}
+              </button>
+              <button type="button" className="chat-action-button" onClick={() => setThreadMessageId(messageRow.id)}>
+                {"\u{1F4AC}"}
+              </button>
+              {canEdit ? (
+                <button
+                  type="button"
+                  className="chat-action-button"
+                  onClick={() => {
+                    setEditingMessageId(messageRow.id);
+                    setEditingValue(messageRow.content ?? "");
+                  }}
+                >
+                  {"\u270F\uFE0F"}
+                </button>
+              ) : null}
+              {canDelete ? (
+                <button type="button" className="chat-action-button danger" onClick={() => deleteMessage(messageRow.id)}>
+                  {"\u{1F5D1}\uFE0F"}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+
+          {reactionPickerMessageId === messageRow.id ? (
+            <div className="chat-emoji-picker">
+              {EMOJI_OPTIONS.map((emoji) => (
+                <button key={`${messageRow.id}-${emoji}`} type="button" onClick={() => addReaction(messageRow.id, emoji)}>
+                  {emoji}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </article>
+    );
   };
 
   useEffect(() => {
-    loadWorkspace({ keepSelection: false });
+    activeChannelIdRef.current = selectedChannelId;
+  }, [selectedChannelId]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    channelsRef.current = channels;
+  }, [channels]);
+
+  useEffect(() => {
+    channelMembersRef.current = channelMembers;
+  }, [channelMembers]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadWorkspace = async () => {
+      await fetchEmployees();
+      const channelRows = await fetchChannels({ keepSelection: false });
+      if (!cancelled && channelRows.length) {
+        setNotice("");
+      }
+    };
+
+    loadWorkspace();
+
+    return () => {
+      cancelled = true;
+    };
   }, [profile.company_id]);
 
   useEffect(() => {
-    if (!activeChannelId) return;
-    markChannelRead(activeChannelId);
-  }, [activeChannelId]);
+    if (!selectedChannelId) {
+      setMessages([]);
+      setReactions([]);
+      return undefined;
+    }
 
-  useEffect(() => {
-    if (!messageListRef.current) return;
-    messageListRef.current.scrollTop = messageListRef.current.scrollHeight;
-  }, [activeChannelMessages.length, threadMessageId]);
+    fetchMessages(selectedChannelId);
+    markChannelRead(selectedChannelId);
+    setThreadMessageId("");
+    setMessageText("");
+    setThreadMessageText("");
+    setMainAttachment(null);
+    setThreadAttachment(null);
+    setTypingUsers([]);
 
-  useEffect(() => {
-    if (!activeChannelId) return undefined;
-
-    const roomChannel = supabase
-      .channel(`chat-room-${activeChannelId}`)
+    const messageChannel = supabase
+      .channel(`messages-${selectedChannelId}`)
       .on(
         "postgres_changes",
         {
           event: "*",
           schema: "public",
           table: "messages",
-          filter: `channel_id=eq.${activeChannelId}`,
+          filter: `channel_id=eq.${selectedChannelId}`,
         },
-        (payload) => {
-          if (payload.eventType === "INSERT") {
-            setMessages((current) => upsertRow(current, payload.new));
-          }
-          if (payload.eventType === "UPDATE") {
-            setMessages((current) => current.map((item) => (item.id === payload.new.id ? payload.new : item)));
-          }
+        async (payload) => {
           if (payload.eventType === "DELETE") {
-            setMessages((current) => current.filter((item) => item.id !== payload.old.id));
+            const nextMessages = messagesRef.current.filter((item) => item.id !== payload.old.id);
+            setMessages(nextMessages);
+            await fetchReactions(selectedChannelId, nextMessages);
+            return;
           }
-          refreshChatUnreadCount?.();
+
+          const fullMessage = await fetchMessageById(payload.new.id);
+          if (!fullMessage) return;
+
+          setMessages((current) =>
+            payload.eventType === "UPDATE"
+              ? current.map((item) => (item.id === fullMessage.id ? fullMessage : item))
+              : upsertById(current, fullMessage),
+          );
+
+          await fetchReactions(selectedChannelId);
+          scrollToBottom(messageListRef);
+
+          if (fullMessage.sender_id !== profile.id && activeChannelIdRef.current === selectedChannelId) {
+            await markChannelRead(selectedChannelId);
+          }
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "message_reactions",
+        },
+        async (payload) => {
+          const reactionMessageId = payload.new?.message_id ?? payload.old?.message_id;
+          if (messagesRef.current.some((messageRow) => messageRow.id === reactionMessageId)) {
+            await fetchReactions(selectedChannelId);
+          }
         },
       )
       .subscribe();
 
+    const typingChannel = supabase
+      .channel(`typing-${selectedChannelId}`)
+      .on("broadcast", { event: "typing" }, ({ payload }) => {
+        if (!payload || payload.user_id === profile.id) return;
+
+        setTypingUsers((current) => Array.from(new Set([...current, payload.user_name])));
+
+        window.clearTimeout(typingTimeoutsRef.current[payload.user_id]);
+        typingTimeoutsRef.current[payload.user_id] = window.setTimeout(() => {
+          setTypingUsers((current) => current.filter((name) => name !== payload.user_name));
+          delete typingTimeoutsRef.current[payload.user_id];
+        }, TYPING_VISIBLE_MS);
+      })
+      .subscribe();
+
+    typingChannelRef.current = typingChannel;
+
     return () => {
-      supabase.removeChannel(roomChannel);
+      supabase.removeChannel(messageChannel);
+      supabase.removeChannel(typingChannel);
+      typingChannelRef.current = null;
+      Object.values(typingTimeoutsRef.current).forEach((timeoutId) => window.clearTimeout(timeoutId));
+      typingTimeoutsRef.current = {};
     };
-  }, [activeChannelId, refreshChatUnreadCount, supabase]);
+  }, [profile.id, selectedChannelId, supabase]);
 
   useEffect(() => {
     const workspaceChannel = supabase
@@ -611,8 +1133,8 @@ export default function Chat() {
           table: "channels",
           filter: `company_id=eq.${profile.company_id}`,
         },
-        () => {
-          loadWorkspace();
+        async () => {
+          await fetchChannels();
         },
       )
       .on(
@@ -622,32 +1144,20 @@ export default function Chat() {
           schema: "public",
           table: "channel_members",
         },
-        () => {
-          loadWorkspace();
+        async () => {
+          await fetchChannels();
         },
       )
       .on(
         "postgres_changes",
         {
-          event: "INSERT",
+          event: "*",
           schema: "public",
           table: "messages",
           filter: `company_id=eq.${profile.company_id}`,
         },
-        (payload) => {
-          const incomingChannel = channelsWithMeta.find((channel) => channel.id === payload.new.channel_id);
-          if (!incomingChannel || payload.new.sender_id === profile.id) return;
-
-          if (incomingChannel.type === "direct" && typeof window !== "undefined" && "Notification" in window) {
-            if (Notification.permission === "default") {
-              Notification.requestPermission();
-            } else if (Notification.permission === "granted") {
-              const senderName = employeesById[payload.new.sender_id]?.name ?? "New message";
-              new Notification(senderName, {
-                body: payload.new.content ?? "Sent an attachment",
-              });
-            }
-          }
+        async () => {
+          await fetchUnreadCounts(channelsRef.current, channelMembersRef.current);
         },
       )
       .subscribe();
@@ -655,356 +1165,166 @@ export default function Chat() {
     return () => {
       supabase.removeChannel(workspaceChannel);
     };
-  }, [channelsWithMeta, employeesById, profile.company_id, profile.id, supabase]);
+  }, [profile.company_id, profile.id, supabase]);
 
   useEffect(() => {
-    loadReactionsForActiveChannel(activeChannelId);
-  }, [activeChannelId, messages]);
-
-  useEffect(() => {
-    const presenceChannel = supabase.channel("online-users", {
-      config: {
-        presence: {
-          key: profile.id,
-        },
-      },
-    });
-
-    presenceChannel
+    const presenceChannel = supabase
+      .channel("online-users")
       .on("presence", { event: "sync" }, () => {
         const state = presenceChannel.presenceState();
-        const nextUsers = Object.entries(state).reduce((accumulator, [userId, entries]) => {
-          const latest = entries[entries.length - 1];
-          accumulator[userId] = latest?.status ?? "offline";
-          return accumulator;
-        }, {});
-        setOnlineUsers(nextUsers);
+        const onlineIds = Object.values(state)
+          .flat()
+          .map((entry) => entry.user_id);
+        setOnlineUsers(Array.from(new Set(onlineIds)));
       })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
-          await presenceChannel.track({
-            user_id: profile.id,
-            status: presenceStatus,
-            last_seen_at: new Date().toISOString(),
-          });
+          await presenceChannel.track({ user_id: profile.id });
         }
       });
 
     return () => {
       supabase.removeChannel(presenceChannel);
     };
-  }, [presenceStatus, profile.id, supabase]);
+  }, [profile.id, supabase]);
 
-  const handleComposerSubmit = async (event) => {
-    event.preventDefault();
-    await sendMessage({
-      content: composerValue,
-      attachment: mainAttachment,
-      reset: () => {
-        setComposerValue("");
-        setMainAttachment(null);
-      },
-    });
-  };
-
-  const handleThreadSubmit = async (event) => {
-    event.preventDefault();
-    await sendMessage({
-      content: threadComposerValue,
-      attachment: threadAttachment,
-      replyTo: threadMessageId,
-      reset: () => {
-        setThreadComposerValue("");
-        setThreadAttachment(null);
-      },
-    });
-  };
-
-  const reactionMap = reactions.reduce((accumulator, item) => {
-    if (!accumulator[item.message_id]) {
-      accumulator[item.message_id] = [];
+  useEffect(() => {
+    if (messages.length) {
+      scrollToBottom(messageListRef);
     }
-    accumulator[item.message_id].push(item);
-    return accumulator;
-  }, {});
+  }, [messages.length]);
 
-  const renderAttachment = (chatMessage) => {
-    if (!chatMessage.file_url) return null;
-    if (isImage(chatMessage.file_type ?? "", chatMessage.file_url)) {
-      return (
-        <a href={chatMessage.file_url} target="_blank" rel="noreferrer" className="chat-attachment-card">
-          <img src={chatMessage.file_url} alt="Chat attachment" className="chat-image-preview" />
-        </a>
-      );
+  useEffect(() => {
+    if (threadReplies.length || threadParent) {
+      scrollToBottom(threadListRef);
     }
-    return (
-      <a href={chatMessage.file_url} target="_blank" rel="noreferrer" className="chat-attachment-card">
-        <Icon name="report" />
-        <span>{chatMessage.file_type || "Attachment"}</span>
-      </a>
-    );
-  };
+  }, [threadParent, threadReplies.length]);
 
-  const renderMessageItem = (chatMessage, previousMessage, query) => {
-    const sender = employeesById[chatMessage.sender_id];
-    const reactionsForMessage = reactionMap[chatMessage.id] ?? [];
-    const grouped =
-      previousMessage &&
-      previousMessage.sender_id === chatMessage.sender_id &&
-      formatDate(previousMessage.created_at) === formatDate(chatMessage.created_at) &&
-      Math.abs(new Date(chatMessage.created_at) - new Date(previousMessage.created_at)) < 5 * 60 * 1000;
-    const isOwn = chatMessage.sender_id === profile.id;
-    const canEdit = isOwn;
-    const canDelete = isOwn || canManageChannels;
-
-    return (
-      <div key={chatMessage.id}>
-        {firstUnreadMessageId === chatMessage.id ? (
-          <div className="chat-unread-divider">
-            <span>Unread messages</span>
-          </div>
-        ) : null}
-        <article className={`chat-message-row${isOwn ? " own" : ""}${grouped ? " grouped" : ""}`}>
-          {!grouped ? (
-            <div
-              className="chat-avatar"
-              style={{
-                background: `${getAvatarColor(sender?.name ?? chatMessage.sender_id)}20`,
-                color: getAvatarColor(sender?.name ?? chatMessage.sender_id),
-              }}
-            >
-              {getInitials(sender?.name)}
-            </div>
-          ) : (
-            <div className="chat-avatar chat-avatar-spacer" />
-          )}
-          <div className={`chat-message-card${isOwn ? " own" : ""}`}>
-            {!grouped ? (
-              <div className="chat-message-meta">
-                <strong>{sender?.name ?? "Unknown sender"}</strong>
-                <span>{formatTime(chatMessage.created_at)}</span>
-              </div>
-            ) : (
-              <div className="chat-message-meta compact">
-                <span>{formatTime(chatMessage.created_at)}</span>
-              </div>
-            )}
-            {chatMessage.is_pinned ? <div className="chat-pinned-label">Pinned</div> : null}
-            {editingMessageId === chatMessage.id ? (
-              <div className="chat-edit-box">
-                <textarea value={editingValue} onChange={(event) => setEditingValue(event.target.value)} />
-                <div className="row-end">
-                  <button type="button" className="ghost-button" onClick={() => setEditingMessageId("")}>
-                    Cancel
-                  </button>
-                  <button type="button" className="primary-button" onClick={() => handleEditSave(chatMessage.id)}>
-                    Save
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <>
-                {chatMessage.content ? <p className="chat-message-text">{highlightContent(chatMessage.content, query)}</p> : null}
-                {renderAttachment(chatMessage)}
-                {chatMessage.edited_at ? <span className="chat-edited-label">edited</span> : null}
-              </>
-            )}
-            {reactionsForMessage.length ? (
-              <div className="chat-reaction-row">
-                {Object.entries(
-                  reactionsForMessage.reduce((accumulator, item) => {
-                    accumulator[item.emoji] = accumulator[item.emoji] ?? [];
-                    accumulator[item.emoji].push(item);
-                    return accumulator;
-                  }, {}),
-                ).map(([emoji, items]) => (
-                  <button
-                    key={`${chatMessage.id}-${emoji}`}
-                    type="button"
-                    className={`chat-reaction-chip${items.some((item) => item.user_id === profile.id) ? " active" : ""}`}
-                    onClick={() => toggleReaction(chatMessage.id, emoji)}
-                  >
-                    <span>{emoji}</span>
-                    <span>{items.length}</span>
-                  </button>
-                ))}
-              </div>
-            ) : null}
-            <div className="chat-message-actions">
-              <button type="button" className="chat-action-button" onClick={() => setReactionTargetId(chatMessage.id)}>
-                React
-              </button>
-              <button type="button" className="chat-action-button" onClick={() => setThreadMessageId(chatMessage.id)}>
-                Reply
-              </button>
-              {canEdit ? (
-                <button
-                  type="button"
-                  className="chat-action-button"
-                  onClick={() => {
-                    setEditingMessageId(chatMessage.id);
-                    setEditingValue(chatMessage.content ?? "");
-                  }}
-                >
-                  Edit
-                </button>
-              ) : null}
-              {canManageChannels ? (
-                <button type="button" className="chat-action-button" onClick={() => handlePinToggle(chatMessage)}>
-                  {chatMessage.is_pinned ? "Unpin" : "Pin"}
-                </button>
-              ) : null}
-              {canDelete ? (
-                <button type="button" className="chat-action-button danger" onClick={() => handleDeleteMessage(chatMessage.id)}>
-                  Delete
-                </button>
-              ) : null}
-            </div>
-            {reactionTargetId === chatMessage.id ? (
-              <div className="chat-emoji-picker">
-                {EMOJI_OPTIONS.map((emoji) => (
-                  <button key={`${chatMessage.id}-${emoji}`} type="button" onClick={() => toggleReaction(chatMessage.id, emoji)}>
-                    {emoji}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </div>
-        </article>
-      </div>
-    );
-  };
+  useEffect(() => {
+    if (!threadParent && threadMessageId) {
+      setThreadMessageId("");
+    }
+  }, [threadMessageId, threadParent]);
 
   return (
     <section className="chat-page">
       {!!error && <div className="alert error">{error}</div>}
-      {!!message && <div className="alert success">{message}</div>}
+      {!!notice && <div className="alert success">{notice}</div>}
 
       <div className="chat-shell panel">
         <aside className="chat-sidebar">
-          <div className="chat-sidebar-header">
-            <div>
-              <h2>Team Chat</h2>
-              <p>Realtime company conversations powered by Supabase.</p>
+          <div className="chat-sidebar-top">
+            <div className="chat-sidebar-brand">
+              <h2>Cliq</h2>
+              <p>Company chat</p>
             </div>
+            <input
+              type="search"
+              className="chat-search-input"
+              placeholder="Search channels or people"
+              value={channelSearch}
+              onChange={(event) => setChannelSearch(event.target.value)}
+            />
           </div>
-          <input
-            type="search"
-            className="chat-search-input"
-            placeholder="Search channels or teammates"
-            value={channelQuery}
-            onChange={(event) => setChannelQuery(event.target.value)}
-          />
+
           <div className="chat-sidebar-section">
             <div className="chat-section-row">
-              <span className="sidebar-section-label">Channels</span>
+              <span className="sidebar-section-label">CHANNELS</span>
               {canManageChannels ? (
-                <button type="button" className="text-button" onClick={createChannel}>
-                  + Add Channel
+                <button
+                  type="button"
+                  className="chat-plus-button"
+                  onClick={() => {
+                    setCreateChannelForm({
+                      name: "",
+                      description: "",
+                      type: "public",
+                      members: [],
+                    });
+                    setShowCreateChannelModal(true);
+                  }}
+                >
+                  +
                 </button>
               ) : null}
             </div>
+
             <div className="chat-sidebar-list">
-              {filteredPublicChannels.map((channel) => (
+              {filteredChannels.map((channel) => (
                 <button
                   key={channel.id}
                   type="button"
-                  className={`chat-channel-item${channel.id === activeChannelId ? " active" : ""}`}
-                  onClick={() => setActiveChannelId(channel.id)}
+                  className={`chat-channel-item${channel.id === selectedChannelId ? " active" : ""}`}
+                  onClick={() => setSelectedChannelId(channel.id)}
                 >
-                  <span>{channel.type === "private" ? "🔒" : "#"} {channel.shortName}</span>
+                  <span className="chat-channel-label">
+                    <span className="chat-channel-prefix">{channel.type === "private" ? "lock" : "#"}</span>
+                    <span className={unreadByChannel[channel.id] ? "chat-channel-strong" : ""}>{channel.displayName}</span>
+                  </span>
                   {unreadByChannel[channel.id] ? <span className="chat-unread-badge">{unreadByChannel[channel.id]}</span> : null}
                 </button>
               ))}
-              {!filteredPublicChannels.length ? <div className="chat-empty-mini">No channels match your search.</div> : null}
+              {!filteredChannels.length ? <div className="chat-empty-mini">No channels found.</div> : null}
             </div>
           </div>
-          <div className="chat-sidebar-section">
+
+          <div className="chat-sidebar-section chat-sidebar-grow">
             <div className="chat-section-row">
-              <span className="sidebar-section-label">Direct Messages</span>
+              <span className="sidebar-section-label">DIRECT MESSAGES</span>
             </div>
+
             <div className="chat-sidebar-list">
               {filteredEmployees.map((employee) => {
-                const isOnline = onlineUsers[employee.id] === "online";
+                const directName = createDirectChannelName(profile.id, employee.id);
+                const active =
+                  selectedChannel?.type === "direct" &&
+                  (selectedChannel.name === directName ||
+                    (selectedChannel.name.includes(profile.id) && selectedChannel.name.includes(employee.id)));
+
                 return (
-                  <button key={employee.id} type="button" className="chat-dm-item" onClick={() => openDirectMessage(employee)}>
+                  <button
+                    key={employee.id}
+                    type="button"
+                    className={`chat-dm-item${active ? " active" : ""}`}
+                    onClick={() => openDM(employee)}
+                  >
                     <span className="chat-dm-copy">
-                      <span className="chat-status-dot-wrap">
-                        <span className={`chat-status-dot${isOnline ? " online" : ""}`} />
+                      <span
+                        className="chat-avatar small"
+                        style={{
+                          background: `${getAvatarColor(employee.name)}20`,
+                          color: getAvatarColor(employee.name),
+                        }}
+                      >
+                        {getInitials(employee.name)}
                       </span>
-                      <span>
+                      <span className="chat-dm-text">
                         <strong>{employee.name}</strong>
-                        <small>{employee.department}</small>
+                        <small>{employee.department || employee.email}</small>
                       </span>
                     </span>
+                    <span className={`chat-status-dot${onlineUsers.includes(employee.id) ? " online" : ""}`} />
                   </button>
                 );
               })}
             </div>
-          </div>
-          <div className="chat-sidebar-footer">
-            <div className="chat-user-chip">
-              <div
-                className="chat-avatar small"
-                style={{
-                  background: `${getAvatarColor(profile.name)}20`,
-                  color: getAvatarColor(profile.name),
-                }}
-              >
-                {getInitials(profile.name)}
-              </div>
-              <div>
-                <strong>{profile.name}</strong>
-                <small>{presenceStatus}</small>
-              </div>
-            </div>
-            <button
-              type="button"
-              className="ghost-button"
-              onClick={() => setPresenceStatus((current) => (current === "online" ? "offline" : "online"))}
-            >
-              Set {presenceStatus === "online" ? "Offline" : "Online"}
-            </button>
           </div>
         </aside>
 
         <div className="chat-main">
           <header className="chat-main-header">
             <div>
-              <h2>{activeChannel?.displayName ?? "Select a chat"}</h2>
+              <h2>{selectedChannel ? (selectedChannel.type === "direct" ? selectedChannel.displayName : `# ${selectedChannel.displayName}`) : "Chat"}</h2>
               <p>
-                {activeChannel?.descriptionLabel ?? "Choose a channel or direct message to start talking."}
-                {activeChannel ? `  •  ${activeChannel.memberCount} members` : ""}
+                {selectedChannel?.descriptionLabel || "Select a channel to start chatting."}
+                {selectedChannel ? ` | ${selectedChannel.memberCount} members` : ""}
               </p>
             </div>
+
             <div className="chat-header-actions">
               <button type="button" className="ghost-button" onClick={() => setShowMessageSearch((current) => !current)}>
                 Search Messages
               </button>
-              {canManageChannels && activeChannel?.type === "private" ? (
-                <button type="button" className="ghost-button" onClick={() => openMemberManager(activeChannel.id)}>
-                  Manage Members
-                </button>
-              ) : null}
-              {canManageChannels && activeChannel?.type !== "direct" ? (
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={async () => {
-                    if (!window.confirm(`Delete ${activeChannel.displayName}?`)) return;
-                    const { error: deleteError } = await supabase.from("channels").delete().eq("id", activeChannel.id);
-                    if (deleteError) {
-                      setError(deleteError.message);
-                      return;
-                    }
-                    setThreadMessageId("");
-                    setActiveChannelId("");
-                    loadWorkspace({ keepSelection: false });
-                  }}
-                >
-                  Delete Channel
-                </button>
-              ) : null}
             </div>
           </header>
 
@@ -1012,39 +1332,55 @@ export default function Chat() {
             <div className="chat-search-bar">
               <input
                 type="search"
-                placeholder="Search messages in this channel"
-                value={messageQuery}
-                onChange={(event) => setMessageQuery(event.target.value)}
+                placeholder="Search in this conversation"
+                value={messageSearch}
+                onChange={(event) => setMessageSearch(event.target.value)}
               />
             </div>
           ) : null}
 
           <div className="chat-message-list" ref={messageListRef}>
-            {loading ? <div className="empty-state">Loading your chat workspace...</div> : null}
-            {!loading && !activeChannel ? <div className="empty-state">No channel selected yet.</div> : null}
-            {!loading && activeChannel && !visibleMessages.length ? (
-              <div className="empty-state">No messages yet in {activeChannel.displayName}. Start the conversation.</div>
+            {loadingWorkspace || loadingMessages ? <div className="empty-state">Loading chat...</div> : null}
+            {!loadingWorkspace && !loadingMessages && !selectedChannel ? <div className="empty-state">Select a channel to begin.</div> : null}
+            {!loadingWorkspace && !loadingMessages && selectedChannel && !visibleMessages.length ? (
+              <div className="empty-state">No messages yet. Start the conversation.</div>
             ) : null}
-            {!loading &&
-              visibleMessages.map((chatMessage, index) => {
+
+            {!loadingWorkspace &&
+              !loadingMessages &&
+              visibleMessages.map((messageRow, index) => {
                 const previousMessage = visibleMessages[index - 1];
-                const currentDate = formatDate(chatMessage.created_at);
-                const previousDate = previousMessage ? formatDate(previousMessage.created_at) : "";
-                const showDateDivider = currentDate !== previousDate;
+                const showDateDivider =
+                  !previousMessage ||
+                  new Date(previousMessage.created_at).toDateString() !== new Date(messageRow.created_at).toDateString();
+
                 return (
-                  <div key={chatMessage.id}>
+                  <div key={messageRow.id}>
                     {showDateDivider ? (
                       <div className="chat-date-divider">
-                        <span>{currentDate}</span>
+                        <span>{formatDayDividerLabel(messageRow.created_at)}</span>
                       </div>
                     ) : null}
-                    {renderMessageItem(chatMessage, previousMessage, messageQuery)}
+
+                    {firstUnreadMessageId === messageRow.id ? (
+                      <div className="chat-unread-divider">
+                        <span>New Messages</span>
+                      </div>
+                    ) : null}
+
+                    {renderMessage(messageRow, previousMessage, messageSearch)}
                   </div>
                 );
               })}
           </div>
 
-          <form className="chat-composer" onSubmit={handleComposerSubmit}>
+          <div className="chat-composer">
+            {typingUsers.length ? (
+              <div className="chat-typing-indicator">
+                {typingUsers.join(", ")} {typingUsers.length === 1 ? "is" : "are"} typing...
+              </div>
+            ) : null}
+
             {mainAttachment ? (
               <div className="chat-attachment-pill">
                 <span>{mainAttachment.file.name}</span>
@@ -1053,40 +1389,42 @@ export default function Chat() {
                 </button>
               </div>
             ) : null}
+
             <div className="chat-composer-row">
-              <button type="button" className="icon-button" onClick={() => fileInputRef.current?.click()}>
-                <Icon name="report" />
+              <button type="button" className="icon-button" onClick={() => mainFileInputRef.current?.click()}>
+                <span aria-hidden="true">{"\u{1F4CE}"}</span>
               </button>
-              <button type="button" className="icon-button" onClick={() => setReactionTargetId("composer-emoji")}>
-                😊
+              <button type="button" className="icon-button" onClick={() => setMessageText((current) => `${current}\u{1F642}`)}>
+                <span aria-hidden="true">{"\u{1F60A}"}</span>
               </button>
               <textarea
-                value={composerValue}
-                placeholder={activeChannel ? `Message ${activeChannel.displayName}` : "Select a channel first"}
-                onChange={(event) => setComposerValue(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    handleComposerSubmit(event);
-                  }
-                }}
-                disabled={!activeChannel}
+                value={messageText}
+                placeholder={selectedChannel ? `Message ${selectedChannel.type === "direct" ? selectedChannel.displayName : `#${selectedChannel.displayName}`}` : "Select a channel first"}
+                onChange={handleMainComposerChange}
+                onKeyDown={handleMessageKeyDown}
+                disabled={!selectedChannel || sending}
               />
-              <button type="submit" className="primary-button" disabled={!activeChannel || saving}>
-                {saving ? "Sending..." : "Send"}
+              <button
+                type="button"
+                className="primary-button"
+                disabled={!selectedChannel || sending}
+                onClick={async () =>
+                  sendMessage({
+                    text: messageText,
+                    attachment: mainAttachment,
+                    onReset: () => {
+                      setMessageText("");
+                      setMainAttachment(null);
+                    },
+                  })
+                }
+              >
+                {sending ? "Sending..." : "Send"}
               </button>
             </div>
-            {reactionTargetId === "composer-emoji" ? (
-              <div className="chat-emoji-picker">
-                {EMOJI_OPTIONS.map((emoji) => (
-                  <button key={`composer-${emoji}`} type="button" onClick={() => setComposerValue((current) => `${current}${emoji}`)}>
-                    {emoji}
-                  </button>
-                ))}
-              </div>
-            ) : null}
+
             <input
-              ref={fileInputRef}
+              ref={mainFileInputRef}
               hidden
               type="file"
               onChange={(event) => {
@@ -1095,7 +1433,7 @@ export default function Chat() {
                 event.target.value = "";
               }}
             />
-          </form>
+          </div>
         </div>
 
         <aside className={`chat-thread${threadMessageId ? " open" : ""}`}>
@@ -1108,13 +1446,15 @@ export default function Chat() {
               <Icon name="close" />
             </button>
           </div>
+
           {threadParent ? (
             <>
-              <div className="chat-thread-body">
-                <div className="chat-thread-origin">{renderMessageItem(threadParent, null, messageQuery)}</div>
-                {threadReplies.map((reply, index) => renderMessageItem(reply, threadReplies[index - 1] ?? threadParent, messageQuery))}
+              <div className="chat-thread-body" ref={threadListRef}>
+                <div className="chat-thread-origin">{renderMessage(threadParent, null, messageSearch, true)}</div>
+                {threadReplies.map((reply, index) => renderMessage(reply, threadReplies[index - 1] ?? threadParent, messageSearch, true))}
               </div>
-              <form className="chat-composer thread" onSubmit={handleThreadSubmit}>
+
+              <div className="chat-composer thread">
                 {threadAttachment ? (
                   <div className="chat-attachment-pill">
                     <span>{threadAttachment.file.name}</span>
@@ -1123,25 +1463,38 @@ export default function Chat() {
                     </button>
                   </div>
                 ) : null}
+
                 <div className="chat-composer-row">
                   <button type="button" className="icon-button" onClick={() => threadFileInputRef.current?.click()}>
-                    <Icon name="report" />
+                    <span aria-hidden="true">{"\u{1F4CE}"}</span>
                   </button>
                   <textarea
-                    value={threadComposerValue}
+                    value={threadMessageText}
                     placeholder="Reply in thread"
-                    onChange={(event) => setThreadComposerValue(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && !event.shiftKey) {
-                        event.preventDefault();
-                        handleThreadSubmit(event);
-                      }
-                    }}
+                    onChange={handleThreadComposerChange}
+                    onKeyDown={handleThreadKeyDown}
+                    disabled={sending}
                   />
-                  <button type="submit" className="primary-button" disabled={saving}>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={sending}
+                    onClick={async () =>
+                      sendMessage({
+                        text: threadMessageText,
+                        attachment: threadAttachment,
+                        replyTo: threadMessageId,
+                        onReset: () => {
+                          setThreadMessageText("");
+                          setThreadAttachment(null);
+                        },
+                      })
+                    }
+                  >
                     Reply
                   </button>
                 </div>
+
                 <input
                   ref={threadFileInputRef}
                   hidden
@@ -1152,51 +1505,109 @@ export default function Chat() {
                     event.target.value = "";
                   }}
                 />
-              </form>
+              </div>
             </>
           ) : (
-            <div className="empty-state">Open a thread from any message to reply here.</div>
+            <div className="empty-state">Open a thread to see replies here.</div>
           )}
         </aside>
       </div>
 
-      {memberManagerChannelId ? (
+      {showCreateChannelModal ? (
         <div className="modal-backdrop">
           <div className="modal-panel">
             <div className="modal-header">
               <div>
-                <h2>Manage Private Channel</h2>
-                <p>Choose which teammates can access this channel.</p>
+                <h2>Create Channel</h2>
+                <p>Add a new chat space for your team.</p>
               </div>
-              <button type="button" className="icon-button" onClick={() => setMemberManagerChannelId("")}>
+              <button type="button" className="icon-button" onClick={() => setShowCreateChannelModal(false)}>
                 <Icon name="close" />
               </button>
             </div>
+
             <div className="modal-body">
               <div className="stack">
-                {employees.map((employee) => (
-                  <label key={employee.id} className="checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={memberSelection.includes(employee.id)}
-                      onChange={(event) => {
-                        setMemberSelection((current) =>
-                          event.target.checked
-                            ? [...current, employee.id]
-                            : current.filter((item) => item !== employee.id),
-                        );
-                      }}
-                    />
-                    {employee.name} • {employee.department}
-                  </label>
-                ))}
+                <label className="field">
+                  <span>Channel name</span>
+                  <input
+                    value={createChannelForm.name}
+                    onChange={(event) =>
+                      setCreateChannelForm((current) => ({
+                        ...current,
+                        name: event.target.value,
+                      }))
+                    }
+                    placeholder="project-alpha"
+                  />
+                </label>
+
+                <label className="field">
+                  <span>Description</span>
+                  <textarea
+                    value={createChannelForm.description}
+                    onChange={(event) =>
+                      setCreateChannelForm((current) => ({
+                        ...current,
+                        description: event.target.value,
+                      }))
+                    }
+                    placeholder="What is this channel for?"
+                  />
+                </label>
+
+                <label className="field">
+                  <span>Channel type</span>
+                  <select
+                    value={createChannelForm.type}
+                    onChange={(event) =>
+                      setCreateChannelForm((current) => ({
+                        ...current,
+                        type: event.target.value,
+                        members: event.target.value === "public" ? [] : current.members,
+                      }))
+                    }
+                  >
+                    <option value="public">Public</option>
+                    <option value="private">Private</option>
+                  </select>
+                </label>
+
+                {createChannelForm.type === "private" ? (
+                  <div className="field">
+                    <span>Members</span>
+                    <div className="chat-member-picker">
+                      {employees.map((employee) => (
+                        <label key={employee.id} className="checkbox-row">
+                          <input
+                            type="checkbox"
+                            checked={employee.id === profile.id || createChannelForm.members.includes(employee.id)}
+                            disabled={employee.id === profile.id}
+                            onChange={(event) =>
+                              setCreateChannelForm((current) => ({
+                                ...current,
+                                members: event.target.checked
+                                  ? [...current.members, employee.id]
+                                  : current.members.filter((userId) => userId !== employee.id),
+                              }))
+                            }
+                          />
+                          {employee.name} | {employee.department || employee.email}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="chat-member-note">All employees will be added automatically to public channels.</div>
+                )}
               </div>
+
               <div className="row-end" style={{ marginTop: 20 }}>
-                <button type="button" className="ghost-button" onClick={() => setMemberManagerChannelId("")}>
+                <button type="button" className="ghost-button" onClick={() => setShowCreateChannelModal(false)}>
                   Cancel
                 </button>
-                <button type="button" className="primary-button" onClick={saveMemberSelection}>
-                  Save Members
+                <button type="button" className="primary-button" onClick={createChannel}>
+                  Create Channel
                 </button>
               </div>
             </div>
