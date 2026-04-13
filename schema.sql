@@ -203,6 +203,51 @@ create table if not exists public.daily_report_submissions (
 
 alter table public.daily_report_submissions add column if not exists drive_link_opened_at timestamptz;
 
+create table if not exists public.channels (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies (id) on delete cascade,
+  name text not null,
+  description text,
+  type text not null default 'public' check (type in ('public', 'private', 'direct')),
+  created_by uuid references public.users (id) on delete set null,
+  created_at timestamptz not null default timezone('utc', now()),
+  unique (company_id, name, type)
+);
+
+create table if not exists public.messages (
+  id uuid primary key default gen_random_uuid(),
+  channel_id uuid not null references public.channels (id) on delete cascade,
+  company_id uuid not null references public.companies (id) on delete cascade,
+  sender_id uuid not null references public.users (id) on delete cascade,
+  content text,
+  file_url text,
+  file_type text,
+  reply_to uuid references public.messages (id) on delete set null,
+  edited_at timestamptz,
+  created_at timestamptz not null default timezone('utc', now()),
+  check (content is not null or file_url is not null)
+);
+
+create table if not exists public.channel_members (
+  id uuid primary key default gen_random_uuid(),
+  channel_id uuid not null references public.channels (id) on delete cascade,
+  user_id uuid not null references public.users (id) on delete cascade,
+  last_read_at timestamptz not null default timezone('utc', now()),
+  created_at timestamptz not null default timezone('utc', now()),
+  unique (channel_id, user_id)
+);
+
+create table if not exists public.message_reactions (
+  id uuid primary key default gen_random_uuid(),
+  message_id uuid not null references public.messages (id) on delete cascade,
+  user_id uuid not null references public.users (id) on delete cascade,
+  emoji text not null,
+  created_at timestamptz not null default timezone('utc', now()),
+  unique (message_id, user_id, emoji)
+);
+
+alter table public.messages add column if not exists is_pinned boolean not null default false;
+
 create index if not exists idx_users_company_id on public.users (company_id);
 create index if not exists idx_attendance_company_date on public.attendance (company_id, date);
 create index if not exists idx_leaves_company_status on public.leaves (company_id, status);
@@ -214,6 +259,11 @@ create index if not exists idx_company_verification_company_id on public.company
 create index if not exists idx_assets_company_status on public.assets (company_id, status);
 create index if not exists idx_notifications_recipient_created on public.notifications (recipient_user_id, created_at desc);
 create index if not exists idx_sync_logs_company_date on public.daily_report_sync_logs (company_id, report_date desc);
+create index if not exists idx_channels_company_type on public.channels (company_id, type, created_at desc);
+create index if not exists idx_messages_channel_created on public.messages (channel_id, created_at);
+create index if not exists idx_messages_company_created on public.messages (company_id, created_at desc);
+create index if not exists idx_channel_members_user_id on public.channel_members (user_id, channel_id);
+create index if not exists idx_reactions_message_id on public.message_reactions (message_id);
 
 alter table public.companies enable row level security;
 alter table public.users enable row level security;
@@ -230,6 +280,10 @@ alter table public.notifications enable row level security;
 alter table public.notification_preferences enable row level security;
 alter table public.google_workspace_integrations enable row level security;
 alter table public.daily_report_sync_logs enable row level security;
+alter table public.channels enable row level security;
+alter table public.messages enable row level security;
+alter table public.channel_members enable row level security;
+alter table public.message_reactions enable row level security;
 
 create or replace function public.get_my_company_id()
 returns uuid
@@ -273,6 +327,141 @@ as $$
   );
 $$;
 
+create or replace function public.can_access_channel(target_channel_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.channels c
+    left join public.channel_members cm
+      on cm.channel_id = c.id
+      and cm.user_id = auth.uid()
+    where c.id = target_channel_id
+      and (
+        public.is_super_admin()
+        or (
+          c.company_id = public.get_my_company_id()
+          and (
+            c.type = 'public'
+            or cm.user_id is not null
+          )
+        )
+      )
+  );
+$$;
+
+create or replace function public.create_default_chat_channels(target_company_id uuid, actor_id uuid default null)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  insert into public.channels (company_id, name, description, type, created_by)
+  values
+    (target_company_id, 'general', 'Company-wide discussions and updates.', 'public', actor_id),
+    (target_company_id, 'announcements', 'Official company announcements.', 'public', actor_id),
+    (target_company_id, 'hr', 'HR questions, policies, and support.', 'public', actor_id),
+    (target_company_id, 'random', 'Casual team chat and non-work banter.', 'public', actor_id)
+  on conflict (company_id, name, type) do nothing;
+
+  insert into public.channel_members (channel_id, user_id)
+  select c.id, u.id
+  from public.channels c
+  join public.users u on u.company_id = c.company_id
+  where c.company_id = target_company_id
+    and c.type = 'public'
+  on conflict (channel_id, user_id) do nothing;
+end;
+$$;
+
+create or replace function public.handle_company_chat_channels()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if new.status = 'approved' and (tg_op = 'INSERT' or old.status is distinct from new.status) then
+    perform public.create_default_chat_channels(new.id, new.verified_by);
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists company_default_chat_channels on public.companies;
+create trigger company_default_chat_channels
+after insert or update of status on public.companies
+for each row
+execute function public.handle_company_chat_channels();
+
+create or replace function public.handle_user_channel_membership()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  insert into public.channel_members (channel_id, user_id)
+  select id, new.id
+  from public.channels
+  where company_id = new.company_id
+    and type = 'public'
+  on conflict (channel_id, user_id) do nothing;
+  return new;
+end;
+$$;
+
+drop trigger if exists user_public_channel_membership on public.users;
+create trigger user_public_channel_membership
+after insert on public.users
+for each row
+execute function public.handle_user_channel_membership();
+
+create or replace function public.sync_message_company_id()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  channel_company_id uuid;
+begin
+  select company_id
+  into channel_company_id
+  from public.channels
+  where id = new.channel_id;
+
+  if channel_company_id is null then
+    raise exception 'Channel not found';
+  end if;
+
+  if new.company_id is null then
+    new.company_id := channel_company_id;
+  end if;
+
+  if new.company_id <> channel_company_id then
+    raise exception 'Message company mismatch';
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists message_company_sync on public.messages;
+create trigger message_company_sync
+before insert or update on public.messages
+for each row
+execute function public.sync_message_company_id();
+
+select public.create_default_chat_channels(id, verified_by)
+from public.companies
+where status = 'approved';
+
 drop policy if exists "companies_select_same_company" on public.companies;
 drop policy if exists "companies_select_open" on public.companies;
 drop policy if exists "companies_insert_authenticated" on public.companies;
@@ -284,6 +473,13 @@ drop policy if exists "notifications_access" on public.notifications;
 drop policy if exists "notification_preferences_self" on public.notification_preferences;
 drop policy if exists "google_workspace_same_company_all" on public.google_workspace_integrations;
 drop policy if exists "sync_logs_same_company_all" on public.daily_report_sync_logs;
+drop policy if exists "channels_company" on public.channels;
+drop policy if exists "messages_select_company" on public.messages;
+drop policy if exists "messages_insert_company" on public.messages;
+drop policy if exists "messages_update_owner_or_admin" on public.messages;
+drop policy if exists "messages_delete_owner_or_admin" on public.messages;
+drop policy if exists "members_access" on public.channel_members;
+drop policy if exists "reactions_access" on public.message_reactions;
 drop policy if exists "users_select_same_company" on public.users;
 drop policy if exists "users_insert_self" on public.users;
 drop policy if exists "users_update_same_company" on public.users;
@@ -300,6 +496,7 @@ drop policy if exists "company_verification_docs_authenticated" on storage.objec
 drop policy if exists "profile_photos_authenticated" on storage.objects;
 drop policy if exists "id_proofs_authenticated" on storage.objects;
 drop policy if exists "salary_slips_authenticated" on storage.objects;
+drop policy if exists "chat_files_authenticated" on storage.objects;
 
 create policy "companies_select_open"
 on public.companies
@@ -422,12 +619,106 @@ for all
 using (public.is_super_admin() or company_id = public.get_my_company_id())
 with check (public.is_super_admin() or company_id = public.get_my_company_id());
 
+create policy "channels_company"
+on public.channels
+for all
+using (public.is_super_admin() or public.can_access_channel(id))
+with check (public.is_super_admin() or company_id = public.get_my_company_id());
+
+create policy "messages_select_company"
+on public.messages
+for select
+using (public.is_super_admin() or public.can_access_channel(channel_id));
+
+create policy "messages_insert_company"
+on public.messages
+for insert
+with check (
+  (public.is_super_admin() or public.can_access_channel(channel_id))
+  and sender_id = auth.uid()
+);
+
+create policy "messages_update_owner_or_admin"
+on public.messages
+for update
+using (public.is_super_admin() or company_id = public.get_my_company_id())
+with check (
+  public.is_super_admin()
+  or (
+    public.can_access_channel(channel_id)
+    and (
+      sender_id = auth.uid()
+      or public.is_manager()
+    )
+  )
+);
+
+create policy "messages_delete_owner_or_admin"
+on public.messages
+for delete
+using (
+  public.is_super_admin()
+  or (
+    public.can_access_channel(channel_id)
+    and (
+      sender_id = auth.uid()
+      or public.is_manager()
+    )
+  )
+);
+
+create policy "members_access"
+on public.channel_members
+for all
+using (
+  public.is_super_admin()
+  or user_id = auth.uid()
+  or channel_id in (
+    select id
+    from public.channels
+    where public.can_access_channel(id)
+  )
+)
+with check (
+  public.is_super_admin()
+  or user_id = auth.uid()
+  or channel_id in (
+    select id
+    from public.channels
+    where company_id = public.get_my_company_id()
+  )
+);
+
+create policy "reactions_access"
+on public.message_reactions
+for all
+using (
+  public.is_super_admin()
+  or message_id in (
+    select id
+    from public.messages
+    where public.can_access_channel(channel_id)
+  )
+)
+with check (
+  public.is_super_admin()
+  or (
+    user_id = auth.uid()
+    and message_id in (
+      select id
+      from public.messages
+      where public.can_access_channel(channel_id)
+    )
+  )
+);
+
 insert into storage.buckets (id, name, public)
 values
   ('profile-photos', 'profile-photos', true),
   ('id-proofs', 'id-proofs', true),
   ('salary-slips', 'salary-slips', true),
-  ('company-verification', 'company-verification', true)
+  ('company-verification', 'company-verification', true),
+  ('chat-files', 'chat-files', true)
 on conflict (id) do nothing;
 
 create policy "profile_photos_authenticated"
@@ -453,3 +744,9 @@ on storage.objects
 for all
 using (bucket_id = 'company-verification' and auth.uid() is not null)
 with check (bucket_id = 'company-verification' and auth.uid() is not null);
+
+create policy "chat_files_authenticated"
+on storage.objects
+for all
+using (bucket_id = 'chat-files' and auth.uid() is not null)
+with check (bucket_id = 'chat-files' and auth.uid() is not null);

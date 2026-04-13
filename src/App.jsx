@@ -23,6 +23,7 @@ import CompanySettings from "./pages/CompanySettings";
 import SuperAdmin from "./pages/SuperAdmin";
 import Assets from "./pages/Assets";
 import Notifications from "./pages/Notifications";
+import Chat from "./pages/Chat";
 
 function hasRecoveryTokens() {
   if (typeof window === "undefined") return false;
@@ -412,6 +413,7 @@ export default function App() {
         <Route path="super-admin" element={<SuperAdmin />} />
         <Route path="assets" element={<Assets />} />
         <Route path="notifications" element={<Notifications />} />
+        <Route path="chat" element={<Chat />} />
       </Route>
       <Route path="*" element={<Navigate to={session ? getPostLoginRoute(profile) : "/"} replace />} />
     </Routes>

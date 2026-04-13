@@ -119,6 +119,13 @@ export function Icon({ name, className = "" }) {
           <path d="M10 20a2 2 0 0 0 4 0" />
         </svg>
       );
+    case "chat":
+      return (
+        <svg {...props}>
+          <path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6A2.5 2.5 0 0 1 16.5 15H11l-4 4v-4H7.5A2.5 2.5 0 0 1 5 12.5Z" />
+          <path d="M9 8.5h6M9 11.5h4" />
+        </svg>
+      );
     case "profile":
       return (
         <svg {...props}>
