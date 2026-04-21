@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@jitsi/react-sdk": "^4.1.0",
     "@supabase/supabase-js": "^2.50.0",
     "@vladmandic/face-api": "^1.7.15",
     "react": "^18.3.1",

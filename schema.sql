@@ -247,6 +247,32 @@ create table if not exists public.message_reactions (
 );
 
 alter table public.messages add column if not exists is_pinned boolean not null default false;
+alter table public.messages add column if not exists read_at timestamptz;
+alter table public.messages add column if not exists file_name text;
+alter table public.messages add column if not exists file_size bigint;
+alter table public.channels add column if not exists icon text;
+
+create table if not exists public.meetings (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete cascade,
+  channel_id uuid references public.channels(id) on delete set null,
+  title text not null,
+  scheduled_at timestamptz not null,
+  duration_minutes int not null default 60,
+  created_by uuid references public.users(id) on delete set null,
+  jitsi_room text,
+  created_at timestamptz not null default timezone('utc', now())
+);
+
+create table if not exists public.meeting_participants (
+  id uuid primary key default gen_random_uuid(),
+  meeting_id uuid not null references public.meetings(id) on delete cascade,
+  user_id uuid not null references public.users(id) on delete cascade,
+  status text not null default 'invited'
+    check (status in ('invited','accepted','declined')),
+  created_at timestamptz not null default timezone('utc', now()),
+  unique(meeting_id, user_id)
+);
 
 create index if not exists idx_users_company_id on public.users (company_id);
 create index if not exists idx_attendance_company_date on public.attendance (company_id, date);
@@ -264,6 +290,9 @@ create index if not exists idx_messages_channel_created on public.messages (chan
 create index if not exists idx_messages_company_created on public.messages (company_id, created_at desc);
 create index if not exists idx_channel_members_user_id on public.channel_members (user_id, channel_id);
 create index if not exists idx_reactions_message_id on public.message_reactions (message_id);
+create index if not exists idx_messages_read_at on public.messages (channel_id, read_at);
+create index if not exists idx_meetings_company_scheduled on public.meetings (company_id, scheduled_at desc);
+create index if not exists idx_meeting_participants_user_id on public.meeting_participants (user_id, meeting_id);
 
 alter table public.companies enable row level security;
 alter table public.users enable row level security;
@@ -284,6 +313,8 @@ alter table public.channels enable row level security;
 alter table public.messages enable row level security;
 alter table public.channel_members enable row level security;
 alter table public.message_reactions enable row level security;
+alter table public.meetings enable row level security;
+alter table public.meeting_participants enable row level security;
 
 create or replace function public.get_my_company_id()
 returns uuid
@@ -458,6 +489,25 @@ before insert or update on public.messages
 for each row
 execute function public.sync_message_company_id();
 
+create or replace function public.mark_channel_messages_read(target_channel_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.can_access_channel(target_channel_id) then
+    raise exception 'Channel access denied';
+  end if;
+
+  update public.messages
+  set read_at = timezone('utc', now())
+  where channel_id = target_channel_id
+    and sender_id <> auth.uid()
+    and read_at is null;
+end;
+$$;
+
 select public.create_default_chat_channels(id, verified_by)
 from public.companies
 where status = 'approved';
@@ -480,6 +530,8 @@ drop policy if exists "messages_update_owner_or_admin" on public.messages;
 drop policy if exists "messages_delete_owner_or_admin" on public.messages;
 drop policy if exists "members_access" on public.channel_members;
 drop policy if exists "reactions_access" on public.message_reactions;
+drop policy if exists "meetings_company_access" on public.meetings;
+drop policy if exists "meeting_participants_access" on public.meeting_participants;
 drop policy if exists "users_select_same_company" on public.users;
 drop policy if exists "users_insert_self" on public.users;
 drop policy if exists "users_update_same_company" on public.users;
@@ -709,6 +761,40 @@ with check (
       from public.messages
       where public.can_access_channel(channel_id)
     )
+  )
+);
+
+create policy "meetings_company_access"
+on public.meetings
+for all
+using (
+  public.is_super_admin()
+  or company_id = public.get_my_company_id()
+)
+with check (
+  public.is_super_admin()
+  or company_id = public.get_my_company_id()
+);
+
+create policy "meeting_participants_access"
+on public.meeting_participants
+for all
+using (
+  public.is_super_admin()
+  or user_id = auth.uid()
+  or meeting_id in (
+    select id
+    from public.meetings
+    where company_id = public.get_my_company_id()
+  )
+)
+with check (
+  public.is_super_admin()
+  or user_id = auth.uid()
+  or meeting_id in (
+    select id
+    from public.meetings
+    where company_id = public.get_my_company_id()
   )
 );
 

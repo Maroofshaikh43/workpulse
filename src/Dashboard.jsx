@@ -9,7 +9,6 @@ const navItems = {
     { to: "attendance", label: "Attendance", icon: "attendance" },
     { to: "leave", label: "Leave", icon: "leave" },
     { to: "mail", label: "Mail", icon: "mail" },
-    { to: "chat", label: "Chat", icon: "chat" },
     { to: "daily-report", label: "Daily Report", icon: "report" },
     { to: "salary-slips", label: "Salary Slips", icon: "salary" },
     { to: "assets", label: "My Assets", icon: "assets" },
@@ -20,7 +19,6 @@ const navItems = {
     { to: "employees", label: "Employees", icon: "employees" },
     { to: "leave-approvals", label: "Leave Approvals", icon: "leave" },
     { to: "broadcast", label: "Broadcast Mail", icon: "broadcast" },
-    { to: "chat", label: "Chat", icon: "chat" },
     { to: "reports", label: "Reports", icon: "report" },
     { to: "salary-slips", label: "Salary Slips", icon: "salary" },
     { to: "assets", label: "Assets", icon: "assets" },
@@ -30,7 +28,6 @@ const navItems = {
     { to: "employees", label: "Employees", icon: "employees" },
     { to: "leave-approvals", label: "Leave Approvals", icon: "leave" },
     { to: "broadcast", label: "Broadcast Mail", icon: "broadcast" },
-    { to: "chat", label: "Chat", icon: "chat" },
     { to: "reports", label: "Reports", icon: "report" },
     { to: "salary-slips", label: "Salary Slips", icon: "salary" },
     { to: "role-management", label: "Role Management", icon: "roles" },
@@ -48,58 +45,12 @@ export default function Dashboard({ supabase, profile, company, refreshProfile, 
   const [menuOpen, setMenuOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [now, setNow] = useState(() => new Date());
-  const [chatUnreadCount, setChatUnreadCount] = useState(0);
 
-  const baseItems = useMemo(() => navItems[profile.role] ?? navItems.employee, [profile.role]);
-  const items = useMemo(
-    () =>
-      baseItems.map((item) =>
-        item.to === "chat"
-          ? {
-              ...item,
-              badge: chatUnreadCount,
-            }
-          : item,
-      ),
-    [baseItems, chatUnreadCount],
-  );
+  const items = useMemo(() => navItems[profile.role] ?? navItems.employee, [profile.role]);
   const activeItem = useMemo(
     () => items.find((item) => location.pathname === `/app/${item.to}`) ?? items[0],
     [items, location.pathname],
   );
-
-  const loadChatUnreadCount = async () => {
-    if (!profile?.company_id || profile.role === "super_admin") {
-      setChatUnreadCount(0);
-      return;
-    }
-
-    const [membersResponse, messagesResponse] = await Promise.all([
-      supabase.from("channel_members").select("channel_id, last_read_at").eq("user_id", profile.id),
-      supabase.from("messages").select("channel_id, created_at, sender_id").eq("company_id", profile.company_id),
-    ]);
-
-    if (membersResponse.error || messagesResponse.error) {
-      setChatUnreadCount(0);
-      return;
-    }
-
-    const lastReadMap = (membersResponse.data ?? []).reduce((accumulator, item) => {
-      accumulator[item.channel_id] = item.last_read_at ? new Date(item.last_read_at).getTime() : 0;
-      return accumulator;
-    }, {});
-
-    const unread = (messagesResponse.data ?? []).reduce((count, item) => {
-      const createdAt = item.created_at ? new Date(item.created_at).getTime() : 0;
-      const lastReadAt = lastReadMap[item.channel_id] ?? 0;
-      if (item.sender_id !== profile.id && createdAt > lastReadAt) {
-        return count + 1;
-      }
-      return count;
-    }, 0);
-
-    setChatUnreadCount(unread);
-  };
 
   useEffect(() => {
     const allowedPaths = items.map((item) => `/app/${item.to}`);
@@ -146,46 +97,6 @@ export default function Dashboard({ supabase, profile, company, refreshProfile, 
 
     checkStatus();
   }, [navigate, onLogout, profile?.company_id, profile?.role, supabase]);
-
-  useEffect(() => {
-    loadChatUnreadCount();
-  }, [profile?.company_id, profile?.id, profile?.role]);
-
-  useEffect(() => {
-    if (!profile?.company_id || profile.role === "super_admin") return undefined;
-
-    const chatChannel = supabase
-      .channel(`dashboard-chat-${profile.id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "messages",
-          filter: `company_id=eq.${profile.company_id}`,
-        },
-        () => {
-          loadChatUnreadCount();
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "channel_members",
-          filter: `user_id=eq.${profile.id}`,
-        },
-        () => {
-          loadChatUnreadCount();
-        },
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(chatChannel);
-    };
-  }, [profile?.company_id, profile?.id, profile?.role, supabase]);
 
   const handleLogout = async () => {
     await onLogout();
@@ -339,8 +250,6 @@ export default function Dashboard({ supabase, profile, company, refreshProfile, 
             refreshProfile,
             pendingLeaves: 0,
             setPendingLeaves: () => {},
-            chatUnreadCount,
-            refreshChatUnreadCount: loadChatUnreadCount,
           }}
         />
         {profile && company?.status === "approved" ? (

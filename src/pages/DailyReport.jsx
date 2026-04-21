@@ -1,426 +1,370 @@
 import { useEffect, useMemo, useState } from "react";
 import { useOutletContext } from "react-router-dom";
-import { formatDate, formatLongDate, getToday } from "../utils";
+import { formatLongDate, formatTime, getToday } from "../utils";
 
-function createRow(date = getToday(), serial = 1) {
-  return {
-    date,
-    serial,
-    workCode: "",
-    platform: "",
-    workDone: "",
-    startTime: "",
-    endTime: "",
-    totalTimeSpent: "",
-    completionStatus: "Completed",
-    remarks: "",
-  };
+const STATUS_OPTIONS = ["Completed", "In Progress", "Blocked", "Not Started"];
+const PRIORITY_OPTIONS = ["High", "Medium", "Low"];
+
+const STATUS_META = {
+  "Completed":   { cls: "present",  color: "#059669" },
+  "In Progress": { cls: "pending",  color: "#d97706" },
+  "Blocked":     { cls: "rejected", color: "#dc2626" },
+  "Not Started": { cls: "",         color: "#94a3b8" },
+};
+
+function uid() {
+  return Math.random().toString(36).slice(2, 9);
 }
 
-function parseStructuredTasks(value) {
-  if (!value) return null;
+function createTask() {
+  return { id: uid(), title: "", category: "", status: "In Progress", priority: "Medium", timeSpent: "", description: "" };
+}
 
+function parseReport(value) {
+  if (!value) return null;
   try {
-    const parsed = JSON.parse(value);
-    if (parsed?.format === "structured-daily-report" && Array.isArray(parsed.rows)) {
-      return parsed;
+    const p = JSON.parse(value);
+    if (p?.format === "v2-task-report" && Array.isArray(p.tasks)) return p;
+    if (p?.format === "structured-daily-report" && Array.isArray(p.rows)) {
+      return {
+        format: "v2-task-report",
+        tasks: p.rows.map((r) => ({
+          id: uid(),
+          title: r.workCode || r.workDone?.slice(0, 60) || "Task",
+          category: r.platform || "",
+          status: r.completionStatus || "Completed",
+          priority: "Medium",
+          timeSpent: r.totalTimeSpent || "",
+          description: r.workDone || r.remarks || "",
+        })),
+        summaryNote: p.summaryNote || "",
+      };
     }
   } catch {
-    return null;
+    /* ignore parse errors */
   }
-
   return null;
 }
 
-function parseHoursLabel(value) {
-  if (!value) return 0;
-  const normalized = String(value).trim().toLowerCase();
-  const number = Number.parseFloat(normalized.replace(/[^\d.]/g, ""));
-  return Number.isFinite(number) ? number : 0;
-}
-
-function calculateDurationLabel(startTime, endTime) {
-  if (!startTime || !endTime) return "";
-
-  const start = new Date(`1970-01-01T${startTime}`);
-  const end = new Date(`1970-01-01T${endTime}`);
-  const diff = end.getTime() - start.getTime();
-  if (diff <= 0) return "";
-
-  const totalMinutes = Math.round(diff / 60000);
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-
-  if (minutes === 0) return `${hours}h`;
-  if (hours === 0) return `${minutes}m`;
-  return `${hours}h ${minutes}m`;
+function fmtTime(date) {
+  return date.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
 }
 
 export default function DailyReport() {
-  const { supabase, profile, company } = useOutletContext();
-  const [submission, setSubmission] = useState(null);
-  const [rows, setRows] = useState([createRow()]);
+  const { supabase, profile } = useOutletContext();
+  const today = getToday();
+
+  const [tasks, setTasks] = useState([createTask()]);
   const [summaryNote, setSummaryNote] = useState("");
+  const [submission, setSubmission] = useState(null);
+  const [attendance, setAttendance] = useState(null);
+  const [checkOutDone, setCheckOutDone] = useState(false);
+  const [checkOutTime, setCheckOutTime] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [checkingOut, setCheckingOut] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [driveOpened, setDriveOpened] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  const driveDestination = profile?.daily_report_drive_url || company?.google_drive_folder_url || "";
-
-  const loadReportState = async () => {
-    const today = getToday();
-    const [submissionResponse, reportResponse] = await Promise.all([
-      supabase
-        .from("daily_report_submissions")
-        .select("*")
-        .eq("user_id", profile.id)
-        .eq("date", today)
-        .maybeSingle(),
-      supabase
-        .from("daily_reports")
-        .select("*")
-        .eq("user_id", profile.id)
-        .eq("date", today)
-        .maybeSingle(),
+  const loadData = async () => {
+    setLoading(true);
+    const [submissionRes, reportRes, attendanceRes] = await Promise.all([
+      supabase.from("daily_report_submissions").select("*").eq("user_id", profile.id).eq("date", today).maybeSingle(),
+      supabase.from("daily_reports").select("*").eq("user_id", profile.id).eq("date", today).maybeSingle(),
+      supabase.from("attendance").select("check_in_time, check_out_time").eq("user_id", profile.id).eq("date", today).maybeSingle(),
     ]);
 
-    if (submissionResponse.error) {
-      setError(submissionResponse.error.message);
-      return;
+    setSubmission(submissionRes.data ?? null);
+    setAttendance(attendanceRes.data ?? null);
+
+    if (attendanceRes.data?.check_out_time) {
+      setCheckOutDone(true);
+      setCheckOutTime(attendanceRes.data.check_out_time.slice(0, 5));
     }
 
-    if (reportResponse.error) {
-      setError(reportResponse.error.message);
-      return;
+    const parsed = parseReport(reportRes.data?.tasks);
+    if (parsed) {
+      setTasks(parsed.tasks.length ? parsed.tasks : [createTask()]);
+      setSummaryNote(parsed.summaryNote ?? "");
     }
-
-    setSubmission(submissionResponse.data ?? null);
-    setDriveOpened(Boolean(submissionResponse.data?.drive_link_opened_at));
-
-    const structured = parseStructuredTasks(reportResponse.data?.tasks);
-    if (structured) {
-      setRows(
-        structured.rows.map((row, index) => ({
-          ...createRow(today, index + 1),
-          ...row,
-          serial: index + 1,
-        })),
-      );
-      setSummaryNote(structured.summaryNote ?? "");
-    } else if (reportResponse.data) {
-      setRows([
-        {
-          ...createRow(today, 1),
-          workDone: reportResponse.data.tasks ?? "",
-          totalTimeSpent: reportResponse.data.hours ? `${reportResponse.data.hours}h` : "",
-          completionStatus: reportResponse.data.mood ?? "Completed",
-        },
-      ]);
-      setSummaryNote("");
-    } else {
-      setRows([createRow(today, 1)]);
-      setSummaryNote("");
-    }
+    setLoading(false);
   };
 
   useEffect(() => {
-    loadReportState();
-  }, [profile.id, supabase]);
-
-  const status = useMemo(() => {
-    if (!company?.google_drive_folder_url && !profile?.daily_report_drive_url) {
-      return "Admin has not configured a company or employee Drive destination yet.";
-    }
-    if (!profile?.daily_report_drive_url) {
-      return "Use the company report destination assigned by admin, then come back and submit today's report.";
-    }
-    return "Open your assigned Drive report from WorkPulse first, then come back and submit today's report.";
-  }, [company, profile]);
+    loadData();
+  }, [profile.id]);
 
   const totalHours = useMemo(
-    () => rows.reduce((sum, row) => sum + parseHoursLabel(row.totalTimeSpent), 0),
-    [rows],
+    () => tasks.reduce((sum, t) => sum + (parseFloat(t.timeSpent) || 0), 0),
+    [tasks],
   );
 
-  const updateRow = (index, key, value) => {
-    setRows((current) =>
-      current.map((row, rowIndex) => {
-        if (rowIndex !== index) return row;
+  const statusCounts = useMemo(() => {
+    const counts = { Completed: 0, "In Progress": 0, Blocked: 0, "Not Started": 0 };
+    for (const t of tasks) counts[t.status] = (counts[t.status] || 0) + 1;
+    return counts;
+  }, [tasks]);
 
-        const nextRow = { ...row, [key]: value };
-        if (key === "startTime" || key === "endTime") {
-          nextRow.totalTimeSpent = calculateDurationLabel(
-            key === "startTime" ? value : nextRow.startTime,
-            key === "endTime" ? value : nextRow.endTime,
-          );
-        }
-        return nextRow;
-      }),
-    );
+  const isSubmitted = Boolean(submission?.submitted_at);
+  const isCheckedOut = checkOutDone || Boolean(attendance?.check_out_time);
+  const canCheckOut = isSubmitted && attendance?.check_in_time && !isCheckedOut;
+
+  const updateTask = (id, key, value) =>
+    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, [key]: value } : t)));
+
+  const addTask = () => setTasks((prev) => [...prev, createTask()]);
+
+  const removeTask = (id) => {
+    if (tasks.length <= 1) return;
+    setTasks((prev) => prev.filter((t) => t.id !== id));
   };
 
-  const addRow = () => {
-    setRows((current) => [...current, createRow(getToday(), current.length + 1)]);
-  };
-
-  const removeRow = (index) => {
-    setRows((current) =>
-      current
-        .filter((_, rowIndex) => rowIndex !== index)
-        .map((row, rowIndex) => ({ ...row, serial: rowIndex + 1 })),
-    );
-  };
-
-  const openAssignedDrive = async () => {
-    setError("");
-    setMessage("");
-
-    if (!driveDestination) {
-      setError("No Drive link has been assigned yet.");
-      return;
-    }
-
-    const { error: upsertError } = await supabase.from("daily_report_submissions").upsert(
-      {
-        user_id: profile.id,
-        company_id: profile.company_id,
-        date: getToday(),
-        drive_link: driveDestination,
-        drive_link_opened_at: new Date().toISOString(),
-      },
-      { onConflict: "user_id,date" },
-    );
-
-    if (upsertError) {
-      setError(upsertError.message);
-      return;
-    }
-
-    setDriveOpened(true);
-    window.open(driveDestination, "_blank", "noopener,noreferrer");
-    setMessage("Drive report opened. After filling it, come back and submit today's report.");
-    loadReportState();
-  };
-
-  const saveReport = async () => {
+  const submitReport = async () => {
     setError("");
     setMessage("");
     setSaving(true);
 
-    if (!driveOpened) {
-      setError("Open your assigned Drive report from WorkPulse before submitting.");
+    const validTasks = tasks.filter((t) => t.title.trim() || t.description.trim());
+    if (!validTasks.length) {
+      setError("Please add at least one task with a title before submitting.");
       setSaving(false);
       return;
     }
 
-    const validRows = rows
-      .map((row, index) => ({
-        ...row,
-        serial: index + 1,
-        date: row.date || getToday(),
-      }))
-      .filter((row) => row.platform || row.workDone || row.startTime || row.endTime || row.remarks || row.workCode);
+    const payload = { format: "v2-task-report", tasks: validTasks, summaryNote };
+    const now = new Date().toISOString();
 
-    if (!validRows.length) {
-      setError("Add at least one report row before saving.");
-      setSaving(false);
-      return;
-    }
-
-    const payload = {
-      format: "structured-daily-report",
-      summaryNote,
-      rows: validRows,
-    };
-
-    const [reportResult, submissionResult] = await Promise.all([
+    const [reportRes, subRes] = await Promise.all([
       supabase.from("daily_reports").upsert(
-        {
-          user_id: profile.id,
-          company_id: profile.company_id,
-          date: getToday(),
-          tasks: JSON.stringify(payload),
-          hours: totalHours,
-          mood: "submitted",
-        },
+        { user_id: profile.id, company_id: profile.company_id, date: today, tasks: JSON.stringify(payload), hours: totalHours, mood: "submitted" },
         { onConflict: "user_id,date" },
       ),
       supabase.from("daily_report_submissions").upsert(
-        {
-          user_id: profile.id,
-          company_id: profile.company_id,
-          date: getToday(),
-          drive_link: driveDestination || null,
-          drive_link_opened_at: submission?.drive_link_opened_at ?? new Date().toISOString(),
-          submitted_at: new Date().toISOString(),
-        },
+        { user_id: profile.id, company_id: profile.company_id, date: today, submitted_at: now },
         { onConflict: "user_id,date" },
       ),
     ]);
 
     setSaving(false);
-
-    if (reportResult.error) {
-      setError(reportResult.error.message);
+    if (reportRes.error || subRes.error) {
+      setError(reportRes.error?.message || subRes.error?.message);
       return;
     }
-
-    if (submissionResult.error) {
-      setError(submissionResult.error.message);
-      return;
-    }
-
-    setMessage("Today's structured daily report has been saved successfully.");
-    loadReportState();
+    setMessage("Report submitted. You can now check out.");
+    await loadData();
   };
+
+  const checkOut = async () => {
+    setError("");
+    setCheckingOut(true);
+    const now = new Date();
+    const { error: updateError } = await supabase
+      .from("attendance")
+      .update({ check_out_time: now.toTimeString().slice(0, 8) })
+      .eq("user_id", profile.id)
+      .eq("date", today);
+
+    setCheckingOut(false);
+    if (updateError) { setError(updateError.message); return; }
+    setCheckOutDone(true);
+    setCheckOutTime(fmtTime(now));
+    setMessage(`Checked out at ${fmtTime(now)}. Great work today!`);
+    await loadData();
+  };
+
+  if (loading) {
+    return (
+      <div className="panel empty-state attendance-model-loading">
+        <div className="attendance-spinner" />
+        <p>Loading your report...</p>
+      </div>
+    );
+  }
 
   return (
     <section className="page-stack">
+
+      {/* ── HEADER ── */}
       <div className="panel">
-        <div className="section-header">
-          <h2>Structured Daily Report</h2>
-          <p>{formatLongDate()}.</p>
+        <div className="row-between" style={{ flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <h2>Daily Work Report</h2>
+            <p style={{ marginTop: 4 }}>{formatLongDate()} — Log your tasks for today</p>
+          </div>
+          {isSubmitted && (
+            <span className="status-pill present">
+              ✓ Submitted {new Date(submission.submitted_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
+            </span>
+          )}
         </div>
-        <div className="mini-card stack">
-          <strong>How this works</strong>
-          <p>1. Open your assigned Drive report from WorkPulse.</p>
-          <p>2. Fill your report details in Drive and come back here.</p>
-          <p>3. Save the structured report in WorkPulse to mark today's report as submitted.</p>
-          <p>{status}</p>
-        </div>
-        {!!error && <div className="alert error">{error}</div>}
-        {!!message && <div className="alert success">{message}</div>}
+        {!!error && <div className="alert error" style={{ marginTop: 16 }}>{error}</div>}
+        {!!message && <div className="alert success" style={{ marginTop: 16 }}>{message}</div>}
       </div>
 
+      {/* ── TASK CARDS ── */}
       <div className="panel">
         <div className="section-header">
-          <h2>Today's Report Sheet</h2>
-          <p>Use the same structure your team uses in Google Sheets.</p>
+          <h2>Tasks</h2>
+          <p>Log each task you worked on today — title, status, and time spent are most important.</p>
         </div>
-        <div className="table-wrap">
-          <table className="report-entry-table">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Sl No</th>
-                <th>Work Code / Project ID</th>
-                <th>Platform</th>
-                <th>Work Done</th>
-                <th>Start Time</th>
-                <th>End Time</th>
-                <th>Total Time Spent</th>
-                <th>Completion Status</th>
-                <th>Remarks</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, index) => (
-                <tr key={`report-row-${index}`}>
-                  <td>
-                    <input type="date" value={row.date} onChange={(event) => updateRow(index, "date", event.target.value)} />
-                  </td>
-                  <td>{row.serial}</td>
-                  <td>
-                    <input value={row.workCode} onChange={(event) => updateRow(index, "workCode", event.target.value)} />
-                  </td>
-                  <td>
-                    <input value={row.platform} onChange={(event) => updateRow(index, "platform", event.target.value)} />
-                  </td>
-                  <td>
-                    <textarea
-                      rows="3"
-                      value={row.workDone}
-                      onChange={(event) => updateRow(index, "workDone", event.target.value)}
-                    />
-                  </td>
-                  <td>
-                    <input type="time" value={row.startTime} onChange={(event) => updateRow(index, "startTime", event.target.value)} />
-                  </td>
-                  <td>
-                    <input type="time" value={row.endTime} onChange={(event) => updateRow(index, "endTime", event.target.value)} />
-                  </td>
-                  <td>
-                    <input
-                      value={row.totalTimeSpent}
-                      onChange={(event) => updateRow(index, "totalTimeSpent", event.target.value)}
-                      placeholder="4h"
-                    />
-                  </td>
-                  <td>
-                    <select
-                      value={row.completionStatus}
-                      onChange={(event) => updateRow(index, "completionStatus", event.target.value)}
-                    >
-                      <option>Completed</option>
-                      <option>In Progress</option>
-                      <option>Not Completed</option>
-                      <option>Need Confirmation</option>
-                    </select>
-                  </td>
-                  <td>
-                    <input value={row.remarks} onChange={(event) => updateRow(index, "remarks", event.target.value)} />
-                  </td>
-                  <td>
-                    <button type="button" className="link-button danger" onClick={() => removeRow(index)} disabled={rows.length === 1}>
-                      Remove
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+
         <div className="stack">
-          <label>
-            Summary Note
-            <textarea
-              rows="4"
-              value={summaryNote}
-              onChange={(event) => setSummaryNote(event.target.value)}
-              placeholder="Add any extra summary, blocker, or follow-up note for your admin."
-            />
-          </label>
-          <div className="grid-two responsive">
-            <div className="mini-card">
-              <strong>Total Logged Time</strong>
-              <p>{totalHours.toFixed(1)} hours</p>
+          {tasks.map((task, index) => (
+            <div key={task.id} className="dr-task-card">
+              {/* card header */}
+              <div className="dr-task-card-header">
+                <span className="dr-task-number">Task {index + 1}</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span className={`status-pill ${STATUS_META[task.status]?.cls ?? ""}`}>{task.status}</span>
+                  <span className={`status-pill ${task.priority === "High" ? "rejected" : task.priority === "Low" ? "present" : "pending"}`}>{task.priority}</span>
+                  <button type="button" className="link-button danger" onClick={() => removeTask(task.id)} disabled={tasks.length === 1}>
+                    Remove
+                  </button>
+                </div>
+              </div>
+
+              {/* title */}
+              <div className="dr-field">
+                <label>Task Title *</label>
+                <input
+                  value={task.title}
+                  onChange={(e) => updateTask(task.id, "title", e.target.value)}
+                  placeholder="What did you work on? (e.g. Implement login page, Fix bug #42)"
+                />
+              </div>
+
+              {/* row: category + status + priority */}
+              <div className="dr-grid-3">
+                <div className="dr-field">
+                  <label>Category / Project</label>
+                  <input
+                    value={task.category}
+                    onChange={(e) => updateTask(task.id, "category", e.target.value)}
+                    placeholder="e.g. Frontend, API, Design"
+                  />
+                </div>
+                <div className="dr-field">
+                  <label>Status</label>
+                  <select value={task.status} onChange={(e) => updateTask(task.id, "status", e.target.value)}>
+                    {STATUS_OPTIONS.map((s) => <option key={s}>{s}</option>)}
+                  </select>
+                </div>
+                <div className="dr-field">
+                  <label>Priority</label>
+                  <select value={task.priority} onChange={(e) => updateTask(task.id, "priority", e.target.value)}>
+                    {PRIORITY_OPTIONS.map((p) => <option key={p}>{p}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              {/* row: time + description */}
+              <div className="dr-grid-2">
+                <div className="dr-field">
+                  <label>Time Spent (hours)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="24"
+                    step="0.5"
+                    value={task.timeSpent}
+                    onChange={(e) => updateTask(task.id, "timeSpent", e.target.value)}
+                    placeholder="e.g. 2.5"
+                  />
+                </div>
+                <div className="dr-field">
+                  <label>Notes / Details</label>
+                  <input
+                    value={task.description}
+                    onChange={(e) => updateTask(task.id, "description", e.target.value)}
+                    placeholder="Brief details, blockers, or what's next"
+                  />
+                </div>
+              </div>
             </div>
-            <div className="mini-card">
-              <strong>Drive Destination</strong>
-              <p>{driveDestination || "No Drive destination configured yet."}</p>
-            </div>
-          </div>
-          <div className="mini-card">
-            <strong>Drive Access Status</strong>
-            <p>
-              {driveOpened
-                ? "Drive link opened in this session. You can now submit today's daily report."
-                : "Submit stays locked until you open the assigned Drive link from here."}
-            </p>
-          </div>
-          <div className="row-end">
-            <button type="button" className="ghost-button" onClick={openAssignedDrive} disabled={!driveDestination}>
-              Open Assigned Drive Report
-            </button>
-            <button type="button" className="ghost-button" onClick={addRow}>
-              Add Report Row
-            </button>
-            <button type="button" className="primary-button" onClick={saveReport} disabled={saving || !driveOpened}>
-              {saving ? "Saving..." : "Save Today's Report"}
-            </button>
-          </div>
-          <div className="mini-card">
-            <strong>Today's Submission</strong>
-            <p>
-              {submission
-                ? `Saved on ${formatDate(submission.submitted_at)} and ready for admin review.`
-                : "Not saved yet. Checkout remains blocked until you save today's report."}
-            </p>
-          </div>
+          ))}
+
+          <button type="button" className="ghost-button" onClick={addTask} style={{ alignSelf: "flex-start" }}>
+            + Add Another Task
+          </button>
         </div>
       </div>
+
+      {/* ── SUMMARY + SUBMIT ── */}
+      <div className="panel">
+        <div className="section-header">
+          <h2>End of Day Summary</h2>
+          <p>Mention blockers, key achievements, or plans for tomorrow.</p>
+        </div>
+
+        <label>
+          Summary Note
+          <textarea
+            rows={3}
+            value={summaryNote}
+            onChange={(e) => setSummaryNote(e.target.value)}
+            placeholder="Today I completed… Blockers: … Tomorrow I plan to…"
+          />
+        </label>
+
+        {/* stats bar */}
+        <div className="dr-stats-bar">
+          <div className="dr-stat">
+            <strong>{tasks.length}</strong>
+            <span>Total Tasks</span>
+          </div>
+          <div className="dr-stat">
+            <strong>{totalHours.toFixed(1)}h</strong>
+            <span>Hours Logged</span>
+          </div>
+          <div className="dr-stat" style={{ "--stat-color": "#059669" }}>
+            <strong style={{ color: "#059669" }}>{statusCounts.Completed}</strong>
+            <span>Completed</span>
+          </div>
+          <div className="dr-stat">
+            <strong style={{ color: "#d97706" }}>{statusCounts["In Progress"]}</strong>
+            <span>In Progress</span>
+          </div>
+          {statusCounts.Blocked > 0 && (
+            <div className="dr-stat">
+              <strong style={{ color: "#dc2626" }}>{statusCounts.Blocked}</strong>
+              <span>Blocked</span>
+            </div>
+          )}
+        </div>
+
+        <div className="row-end" style={{ marginTop: 20 }}>
+          <button type="button" className="primary-button" onClick={submitReport} disabled={saving}>
+            {saving ? "Submitting…" : isSubmitted ? "Re-submit Report" : "Submit Daily Report"}
+          </button>
+        </div>
+      </div>
+
+      {/* ── CHECKOUT ── */}
+      {isSubmitted && (
+        <div className={`dr-checkout-card${isCheckedOut ? " done" : ""}`}>
+          <div className="row-between" style={{ flexWrap: "wrap", gap: 12 }}>
+            <div>
+              <strong style={{ fontSize: 15 }}>
+                {isCheckedOut ? `Checked out at ${checkOutTime} ✓` : "Ready to check out"}
+              </strong>
+              <p style={{ marginTop: 6 }}>
+                {isCheckedOut
+                  ? "Your day is complete. Your report has been saved and submitted to HR."
+                  : attendance?.check_in_time
+                    ? `You checked in at ${formatTime(attendance.check_in_time)}. Click Check Out to end your day.`
+                    : "No check-in record found for today. Please check in first from the Attendance page."}
+              </p>
+            </div>
+            {canCheckOut && (
+              <button type="button" className="primary-button" onClick={checkOut} disabled={checkingOut}>
+                {checkingOut ? "Checking out…" : "Check Out"}
+              </button>
+            )}
+            {isCheckedOut && <span className="status-pill present">Day Complete</span>}
+          </div>
+        </div>
+      )}
+
     </section>
   );
 }
