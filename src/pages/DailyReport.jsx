@@ -140,7 +140,7 @@ export default function DailyReport() {
         { onConflict: "user_id,date" },
       ),
       supabase.from("daily_report_submissions").upsert(
-        { user_id: profile.id, company_id: profile.company_id, date: today, submitted_at: now },
+        { user_id: profile.id, company_id: profile.company_id, date: today, tasks: JSON.stringify(payload), submitted_at: now },
         { onConflict: "user_id,date" },
       ),
     ]);
